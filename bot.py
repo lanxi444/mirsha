@@ -13,7 +13,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 # --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = "8924797159:AAHzZ1G5R6sKXPaHIOMu5xIhZtxq3ik2YFM"
-ADMIN_IDS = [8924797159]  # Ваш Telegram ID
+
+# СПИСОК АДМИНОВ (ваши ID)
+ADMIN_IDS = [1497899700, 1235335612]
 
 # Настройка логирования
 logging.basicConfig(
@@ -50,7 +52,7 @@ async def cmd_start(message: types.Message):
 /stats — статистика бота
 /admin — информация для администраторов
 
-💡 Статус: {'✅ Вы администратор' if is_admin else '❌ Вы не администратор'}
+💡 Статус: {'✅ Вы администратор, будете получать уведомления' if is_admin else '❌ Вы не администратор'}
     """
     
     await message.answer(welcome_text, parse_mode="Markdown")
@@ -70,6 +72,13 @@ async def cmd_help(message: types.Message):
 
 📦 *Для администраторов:*
 Когда на сайте оформляется новый заказ, я автоматически присылаю уведомление в этот чат.
+
+🔔 Уведомление содержит:
+• Номер и дату заказа
+• Информацию о клиенте
+• Состав заказа
+• Сумму
+• Код отслеживания
     """
     
     await message.answer(help_text, parse_mode="Markdown")
@@ -94,6 +103,7 @@ async def cmd_stats(message: types.Message):
 🔄 Статус: ✅ Работает
 📅 Запущен: {datetime.now().strftime("%d.%m.%Y %H:%M")}
 🤖 Версия: 1.0.0
+👥 Администраторов: {len(ADMIN_IDS)}
 📦 Ожидание заказов...
 
 💡 Уведомления приходят автоматически при оформлении заказа на сайте.
@@ -107,6 +117,8 @@ async def cmd_admin(message: types.Message):
     """Информация для администраторов"""
     user_id = message.from_user.id
     is_admin = user_id in ADMIN_IDS
+    
+    admin_list = "\n".join([f"• `{aid}`" for aid in ADMIN_IDS]) if ADMIN_IDS else "• (пусто)"
     
     admin_text = f"""
 🔐 *Информация для администраторов*
@@ -122,7 +134,7 @@ async def cmd_admin(message: types.Message):
 3. Перезапустите бота
 
 📝 Текущий список администраторов:
-{chr(10).join([f'• `{aid}`' for aid in ADMIN_IDS]) if ADMIN_IDS else '• (пусто)'}
+{admin_list}
     """
     
     await message.answer(admin_text, parse_mode="Markdown")
@@ -174,8 +186,8 @@ async def main():
         logger.info(f"✅ Бот успешно подключился к Telegram API")
         logger.info(f"📌 Имя бота: @{me.username}")
         logger.info(f"🆔 ID бота: {me.id}")
+        logger.info(f"👥 Администраторы: {ADMIN_IDS}")
         
-        # Удаляем вебхук, чтобы использовать polling
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("✅ Вебхук удален, используем polling")
         
