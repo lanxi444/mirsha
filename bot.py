@@ -7,6 +7,9 @@ import json
 import os
 from datetime import datetime, timedelta
 
+# !!! ВАЖНО: добавляем импорт aiohttp !!!
+import aiohttp
+
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -16,9 +19,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 BOT_TOKEN = "8924797159:AAHzZ1G5R6sKXPaHIOMu5xIhZtxq3ik2YFM"
 ADMIN_IDS = [1497899700, 1235335612]
 
-# URL вашего сайта
 SITE_URL = "https://mirsharov-pb.ru"
-ORDERS_FILE = "orders.json"  # на сайте
+ORDERS_FILE = "orders.json"
 
 # Настройка логирования
 logging.basicConfig(
@@ -27,14 +29,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# Храним ID последнего обработанного заказа
 last_order_id = None
-# Храним время последней проверки
 last_check_time = datetime.now() - timedelta(minutes=5)
 
 
@@ -45,7 +44,6 @@ last_check_time = datetime.now() - timedelta(minutes=5)
 async def send_order_notification(order_data: dict):
     """Отправляет уведомление о заказе всем администраторам"""
     try:
-        # Формируем сообщение
         order_id = order_data.get('id', 'Неизвестно')
         order_date = order_data.get('date', datetime.now().strftime("%d.%m.%Y %H:%M"))
         customer_name = order_data.get('name', 'Не указано')
@@ -57,21 +55,30 @@ async def send_order_notification(order_data: dict):
         cart = order_data.get('cart', [])
         comment = order_data.get('comment', '')
         
+        # Экранируем спецсимволы для Markdown
+        def escape_md(text):
+            if not text:
+                return ''
+            chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+            for ch in chars:
+                text = text.replace(ch, '\\' + ch)
+            return text
+        
+        # Формируем сообщение
         message = f"""
 🛒 *НОВЫЙ ЗАКАЗ!*
 
 📋 *Информация о заказе:*
 🔢 Номер: `{order_id}`
 📅 Дата: {order_date}
-🔑 Код отслеживания: `{track_key}`
+🔑 Код: `{track_key}`
 
 👤 *Клиент:*
-Имя: {customer_name}
-📞 Телефон: {customer_phone}
-💬 Мессенджер: {messenger}
+Имя: {escape_md(customer_name)}
+📞 Телефон: {escape_md(customer_phone)}
+💬 Мессенджер: {escape_md(messenger)}
 
-📦 *Тип получения:*
-{ '📍 Самовывоз' if delivery_type == 'pickup' else '🚚 Доставка' }
+📦 *Тип:* { '📍 Самовывоз' if delivery_type == 'pickup' else '🚚 Доставка' }
 """
         
         if delivery_type != 'pickup':
@@ -84,17 +91,16 @@ async def send_order_notification(order_data: dict):
             address = ', '.join(address_parts) if address_parts else 'Не указан'
             
             message += f"""
-📍 *Адрес доставки:*
-{address}
+📍 *Адрес:* {escape_md(address)}
 🚪 Подъезд: {order_data.get('porch', '-')}
 🏢 Этаж: {order_data.get('floor', '-')}
 📞 Домофон: {order_data.get('intercom', '-')}
 """
             
             if order_data.get('leave_at_door'):
-                message += "🔑 *Оставить у двери:* ✅ Да\n"
+                message += "🔑 Оставить у двери: ✅ Да\n"
             if order_data.get('warn_delivery'):
-                message += "📞 *Предупредить о доставке:* ✅ Да\n"
+                message += "📞 Предупредить о доставке: ✅ Да\n"
         
         if order_data.get('order_date'):
             message += f"""
@@ -104,8 +110,8 @@ async def send_order_notification(order_data: dict):
         
         if comment:
             message += f"""
-💬 *Комментарий к заказу:*
-{comment}
+💬 *Комментарий:*
+{escape_md(comment)}
 """
         
         message += f"""
@@ -116,8 +122,8 @@ async def send_order_notification(order_data: dict):
         
         if cart:
             for idx, item in enumerate(cart, 1):
-                item_name = item.get('name', 'Товар')
-                item_article = item.get('article', '—')
+                item_name = escape_md(item.get('name', 'Товар'))
+                item_article = escape_md(item.get('article', '—'))
                 item_price = item.get('price', 0)
                 item_qty = item.get('quantity', 1)
                 item_total = item_price * item_qty
@@ -125,6 +131,8 @@ async def send_order_notification(order_data: dict):
                 message += f"{idx}. {item_name} (Арт: {item_article}) — {item_price}₽ × {item_qty} = {item_total}₽\n"
         else:
             message += "❌ Состав заказа не указан\n"
+        
+        message += f"\n🔗 Посмотреть в админке: https://mirsharov-pb.ru/?admin=mirsharov2026"
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
@@ -160,7 +168,6 @@ async def check_new_orders():
     global last_order_id, last_check_time
     
     try:
-        # Получаем файл с заказами с сайта
         url = f"{SITE_URL}/{ORDERS_FILE}"
         
         async with aiohttp.ClientSession() as session:
@@ -171,37 +178,13 @@ async def check_new_orders():
                     if not orders:
                         return
                     
-                    # Сортируем заказы по времени (новые сверху)
-                    # В вашем orders.json заказы хранятся в порядке добавления
-                    # (новые в начале массива)
-                    
-                    # Проверяем первый заказ (самый новый)
                     latest_order = orders[0]
                     
-                    # Если это новый заказ (не отправляли уведомление)
                     if latest_order.get('id') != last_order_id and not latest_order.get('notified', False):
-                        # Отправляем уведомление
                         await send_order_notification(latest_order)
-                        
-                        # Отмечаем заказ как уведомлённый (сохраняем на сайте?)
-                        # Вариант: отправляем запрос на сайт, чтобы отметить заказ
-                        # Или просто запоминаем ID в памяти бота
                         last_order_id = latest_order.get('id')
-                        
-                        # Отмечаем заказ как обработанный в памяти бота
-                        logger.info(f"✅ Новый заказ #{last_order_id} обнаружен и уведомление отправлено")
-                        
-                        # Обновляем время проверки
                         last_check_time = datetime.now()
-                        
-                        # Попробуем отметить заказ на сайте (через API)
-                        try:
-                            mark_url = f"{SITE_URL}/api.php?action=mark_order_notified&id={last_order_id}"
-                            async with session.get(mark_url, timeout=5) as mark_response:
-                                if mark_response.status == 200:
-                                    logger.info(f"✅ Заказ #{last_order_id} отмечен как уведомлённый на сайте")
-                        except Exception as e:
-                            logger.warning(f"Не удалось отметить заказ на сайте: {e}")
+                        logger.info(f"✅ Новый заказ #{last_order_id} обнаружен и уведомление отправлено")
                     else:
                         logger.debug(f"Новых заказов нет. Последний ID: {last_order_id}")
                 else:
@@ -223,7 +206,7 @@ async def periodic_check():
             await check_new_orders()
         except Exception as e:
             logger.error(f"Ошибка в periodic_check: {e}")
-        await asyncio.sleep(15)  # Проверяем каждые 15 секунд
+        await asyncio.sleep(15)
 
 
 # ==========================================
@@ -232,7 +215,6 @@ async def periodic_check():
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    """Обработчик команды /start"""
     user_id = message.from_user.id
     user_name = message.from_user.full_name
     is_admin = user_id in ADMIN_IDS
@@ -240,7 +222,7 @@ async def cmd_start(message: types.Message):
     welcome_text = f"""
 👋 *Здравствуйте, {user_name}!*
 
-🤖 Я бот-уведомитель для магазина **"Мир Шаров"**.
+🤖 Я бот-уведомитель для магазина *Мир Шаров*.
 
 📦 Я автоматически проверяю новые заказы на сайте и присылаю уведомления.
 
@@ -251,7 +233,7 @@ async def cmd_start(message: types.Message):
 /check — принудительная проверка заказов
 /admin — информация для администраторов
 
-💡 Статус: {'✅ Вы администратор, будете получать уведомления' if is_admin else '❌ Вы не администратор'}
+💡 Статус: {'✅ Вы администратор' if is_admin else '❌ Вы не администратор'}
     """
     
     await message.answer(welcome_text, parse_mode="Markdown")
@@ -259,163 +241,115 @@ async def cmd_start(message: types.Message):
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
-    """Обработчик команды /help"""
     help_text = """
-📚 *Список доступных команд:*
+📚 *Список команд:*
 
 /start — приветственное сообщение
-/help — этот список команд
+/help — этот список
 /stats — статистика бота
-/ping — проверка работоспособности
-/check — принудительно проверить новые заказы
-/admin — информация для администраторов
+/ping — проверка работы
+/check — проверить новые заказы
+/admin — информация об админах
 
-📦 *Для администраторов:*
-Бот автоматически проверяет новые заказы каждые 15 секунд.
-При появлении нового заказа вы получаете уведомление.
+📦 Бот автоматически проверяет заказы каждые 15 секунд.
     """
-    
     await message.answer(help_text, parse_mode="Markdown")
 
 
 @dp.message(Command("ping"))
 async def cmd_ping(message: types.Message):
-    """Проверка работы бота"""
-    start_time = datetime.now()
     await message.answer("🏓 Понг! Бот работает.")
-    end_time = datetime.now()
-    response_time = (end_time - start_time).total_seconds() * 1000
-    await message.answer(f"⏱ Время ответа: {response_time:.0f} мс")
 
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: types.Message):
-    """Статистика бота"""
     stats_text = f"""
-📊 *Статистика бота:*
+📊 *Статистика:*
 
 🔄 Статус: ✅ Работает
 📅 Запущен: {datetime.now().strftime("%d.%m.%Y %H:%M")}
-🤖 Версия: 2.0.0 (с авто-проверкой)
-👥 Администраторов: {len(ADMIN_IDS)}
-📦 Проверка заказов: каждые 15 секунд
-🕐 Последняя проверка: {last_check_time.strftime("%H:%M:%S") if last_check_time else "—"}
-
-💡 Уведомления приходят автоматически при появлении новых заказов.
+👥 Админов: {len(ADMIN_IDS)}
+📦 Проверка: каждые 15 сек
+🕐 Последняя: {last_check_time.strftime("%H:%M:%S") if last_check_time else "—"}
     """
-    
     await message.answer(stats_text, parse_mode="Markdown")
 
 
 @dp.message(Command("check"))
 async def cmd_check(message: types.Message):
-    """Принудительная проверка заказов"""
     user_id = message.from_user.id
     if user_id not in ADMIN_IDS:
-        await message.answer("❌ Эта команда доступна только администраторам.")
+        await message.answer("❌ Только для админов.")
         return
     
-    await message.answer("🔍 Выполняю проверку заказов...")
+    await message.answer("🔍 Проверяю заказы...")
     await check_new_orders()
     await message.answer("✅ Проверка завершена!")
 
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
-    """Информация для администраторов"""
     user_id = message.from_user.id
     is_admin = user_id in ADMIN_IDS
     
     admin_list = "\n".join([f"• `{aid}`" for aid in ADMIN_IDS]) if ADMIN_IDS else "• (пусто)"
     
     admin_text = f"""
-🔐 *Информация для администраторов*
+🔐 *Администраторы*
 
-Ваш Telegram ID: `{user_id}`
-Статус: {'✅ Вы администратор' if is_admin else '❌ Вы не администратор'}
+Ваш ID: `{user_id}`
+Статус: {'✅ Администратор' if is_admin else '❌ Не админ'}
 
-{'📌 Вы будете получать уведомления о заказах.' if is_admin else ''}
-
-💡 *Как стать администратором:*
-1. Узнайте свой Telegram ID у бота @userinfobot
-2. Добавьте ID в список ADMIN_IDS в файле bot.py
-3. Перезапустите бота
-
-📝 Текущий список администраторов:
+📝 Список админов:
 {admin_list}
     """
-    
     await message.answer(admin_text, parse_mode="Markdown")
 
 
 # ==========================================
-# ОБРАБОТЧИКИ CALLBACK
+# CALLBACK
 # ==========================================
 
 @dp.callback_query(lambda c: c.data and c.data.startswith('view_order_'))
 async def process_view_order(callback_query: types.CallbackQuery):
-    """Обработчик нажатия кнопки 'Посмотреть заказ'"""
     order_id = callback_query.data.replace('view_order_', '')
-    await callback_query.answer(f"👀 Просмотр заказа #{order_id}")
+    await callback_query.answer(f"👀 Заказ #{order_id}")
     await callback_query.message.reply(
-        f"🔍 Для просмотра заказа #{order_id} откройте админ-панель на сайте.\n\n{SITE_URL}/?admin=mirsharov2026",
-        parse_mode="Markdown"
+        f"🔍 Просмотр: https://mirsharov-pb.ru/?admin=mirsharov2026"
     )
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith('process_order_'))
 async def process_order(callback_query: types.CallbackQuery):
-    """Обработчик нажатия кнопки 'Отметить как обработанный'"""
     order_id = callback_query.data.replace('process_order_', '')
-    
-    await callback_query.answer(f"✅ Заказ #{order_id} отмечен как обработанный!")
-    
+    await callback_query.answer(f"✅ Заказ #{order_id} обработан!")
     await callback_query.message.edit_text(
-        text=callback_query.message.text + "\n\n✅ *Заказ отмечен как обработанный администратором.*",
-        parse_mode="Markdown"
-    )
-    
-    await callback_query.message.reply(
-        f"✅ Заказ #{order_id} успешно отмечен как обработанный!",
+        text=callback_query.message.text + "\n\n✅ *Обработан администратором.*",
         parse_mode="Markdown"
     )
 
 
 # ==========================================
-# ЗАПУСК БОТА
+# ЗАПУСК
 # ==========================================
 
 async def main():
-    """Главная функция запуска бота"""
-    global last_order_id, last_check_time
-    
     logger.info("🚀 Бот запускается...")
-    
-    if not BOT_TOKEN:
-        logger.error("❌ Токен бота не найден!")
-        return
     
     try:
         me = await bot.get_me()
-        logger.info(f"✅ Бот успешно подключился к Telegram API")
-        logger.info(f"📌 Имя бота: @{me.username}")
-        logger.info(f"🆔 ID бота: {me.id}")
-        logger.info(f"👥 Администраторы: {ADMIN_IDS}")
-        logger.info(f"🌐 Сайт: {SITE_URL}")
+        logger.info(f"✅ Бот @{me.username} запущен")
+        logger.info(f"👥 Админы: {ADMIN_IDS}")
         
-        # Удаляем вебхук
         await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("✅ Вебхук удален, используем polling")
         
-        # Запускаем фоновую проверку заказов
+        # Запускаем фоновую проверку
         asyncio.create_task(periodic_check())
-        logger.info("🔄 Фоновая проверка заказов запущена")
+        logger.info("🔄 Проверка заказов запущена")
         
-        # Инициализируем last_order_id — получаем последний заказ
-        logger.info("📦 Загружаем последний заказ...")
+        # Проверяем сразу при старте
         await check_new_orders()
         
-        logger.info("📡 Начинаем прослушивание обновлений...")
         await dp.start_polling(bot)
     except Exception as e:
         logger.error(f"❌ Ошибка при запуске бота: {e}")
