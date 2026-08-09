@@ -13,9 +13,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 # --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = "8924797159:AAHzZ1G5R6sKXPaHIOMu5xIhZtxq3ik2YFM"
-
-# Ваш Telegram ID (можно получить у @userinfobot)
-# Для группы ID начинается с минуса: -1001234567890
 ADMIN_IDS = [8924797159]  # Ваш Telegram ID
 
 # Настройка логирования
@@ -38,8 +35,6 @@ async def cmd_start(message: types.Message):
     """Обработчик команды /start"""
     user_id = message.from_user.id
     user_name = message.from_user.full_name
-    
-    # Проверяем, является ли пользователь администратором
     is_admin = user_id in ADMIN_IDS
     
     welcome_text = f"""
@@ -55,7 +50,7 @@ async def cmd_start(message: types.Message):
 /stats — статистика бота
 /admin — информация для администраторов
 
-💡 Статус: {'✅ Вы администратор, будете получать уведомления' if is_admin else '❌ Вы не администратор'}
+💡 Статус: {'✅ Вы администратор' if is_admin else '❌ Вы не администратор'}
     """
     
     await message.answer(welcome_text, parse_mode="Markdown")
@@ -75,13 +70,6 @@ async def cmd_help(message: types.Message):
 
 📦 *Для администраторов:*
 Когда на сайте оформляется новый заказ, я автоматически присылаю уведомление в этот чат.
-
-🔔 Уведомление содержит:
-• Номер и дату заказа
-• Информацию о клиенте
-• Состав заказа
-• Сумму
-• Код отслеживания
     """
     
     await message.answer(help_text, parse_mode="Markdown")
@@ -140,7 +128,7 @@ async def cmd_admin(message: types.Message):
     await message.answer(admin_text, parse_mode="Markdown")
 
 
-# --- ОБРАБОТЧИКИ CALLBACK (для кнопок в сообщениях) ---
+# --- ОБРАБОТЧИКИ CALLBACK ---
 
 @dp.callback_query(lambda c: c.data and c.data.startswith('view_order_'))
 async def process_view_order(callback_query: types.CallbackQuery):
