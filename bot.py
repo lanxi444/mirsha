@@ -6,9 +6,8 @@ import logging
 import json
 import os
 from datetime import datetime, timedelta
-
-# !!! ВАЖНО: добавляем импорт aiohttp !!!
 import aiohttp
+from aiohttp import web
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -38,6 +37,30 @@ last_check_time = datetime.now() - timedelta(minutes=5)
 
 
 # ==========================================
+# ВЕБ-СЕРВЕР ДЛЯ RENDER (чтобы не убивал процесс)
+# ==========================================
+
+async def health_check(request):
+    """Проверка здоровья для Render"""
+    return web.Response(text="OK", status=200)
+
+async def start_web_server():
+    """Запускает минимальный веб-сервер"""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    app.router.add_get('/ping', health_check)
+    
+    # Порт 10000 для Render
+    port = int(os.environ.get('PORT', 10000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host='0.0.0.0', port=port)
+    await site.start()
+    logger.info(f"🌐 Веб-сервер запущен на порту {port}")
+
+
+# ==========================================
 # ФУНКЦИЯ ОТПРАВКИ УВЕДОМЛЕНИЯ
 # ==========================================
 
@@ -54,8 +77,7 @@ async def send_order_notification(order_data: dict):
         track_key = order_data.get('track_key', 'Не указан')
         cart = order_data.get('cart', [])
         comment = order_data.get('comment', '')
-        
-        # Экранируем спецсимволы для Markdown
+
         def escape_md(text):
             if not text:
                 return ''
@@ -63,8 +85,7 @@ async def send_order_notification(order_data: dict):
             for ch in chars:
                 text = text.replace(ch, '\\' + ch)
             return text
-        
-        # Формируем сообщение
+
         message = f"""
 🛒 *НОВЫЙ ЗАКАЗ!*
 
@@ -80,46 +101,43 @@ async def send_order_notification(order_data: dict):
 
 📦 *Тип:* { '📍 Самовывоз' if delivery_type == 'pickup' else '🚚 Доставка' }
 """
-        
+
         if delivery_type != 'pickup':
             address_parts = []
             if order_data.get('street'): address_parts.append(order_data['street'])
             if order_data.get('house'): address_parts.append(f"д. {order_data['house']}")
             if order_data.get('building'): address_parts.append(f"стр. {order_data['building']}")
             if order_data.get('apartment'): address_parts.append(f"кв. {order_data['apartment']}")
-            
             address = ', '.join(address_parts) if address_parts else 'Не указан'
-            
             message += f"""
 📍 *Адрес:* {escape_md(address)}
 🚪 Подъезд: {order_data.get('porch', '-')}
 🏢 Этаж: {order_data.get('floor', '-')}
 📞 Домофон: {order_data.get('intercom', '-')}
 """
-            
             if order_data.get('leave_at_door'):
                 message += "🔑 Оставить у двери: ✅ Да\n"
             if order_data.get('warn_delivery'):
                 message += "📞 Предупредить о доставке: ✅ Да\n"
-        
+
         if order_data.get('order_date'):
             message += f"""
 📅 *Дата доставки:* {order_data['order_date']}
 ⏰ *Время:* {order_data.get('order_time', 'Не указано')}
 """
-        
+
         if comment:
             message += f"""
 💬 *Комментарий:*
 {escape_md(comment)}
 """
-        
+
         message += f"""
 💰 *Сумма заказа:* {total} ₽
 
 📋 *Состав заказа:*
 """
-        
+
         if cart:
             for idx, item in enumerate(cart, 1):
                 item_name = escape_md(item.get('name', 'Товар'))
@@ -127,36 +145,26 @@ async def send_order_notification(order_data: dict):
                 item_price = item.get('price', 0)
                 item_qty = item.get('quantity', 1)
                 item_total = item_price * item_qty
-                
                 message += f"{idx}. {item_name} (Арт: {item_article}) — {item_price}₽ × {item_qty} = {item_total}₽\n"
         else:
             message += "❌ Состав заказа не указан\n"
-        
-        message += f"\n🔗 Посмотреть в админке: https://mirsharov-pb.ru/?admin=mirsharov2026"
-        
+
+        message += f"\n🔗 Посмотреть в админке: {SITE_URL}/?admin=mirsharov2026"
+
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="📦 Посмотреть заказ", callback_data=f"view_order_{order_id}")
-            ],
-            [
-                InlineKeyboardButton(text="✅ Отметить как обработанный", callback_data=f"process_order_{order_id}")
-            ]
+            [InlineKeyboardButton(text="📦 Посмотреть заказ", callback_data=f"view_order_{order_id}")],
+            [InlineKeyboardButton(text="✅ Отметить как обработанный", callback_data=f"process_order_{order_id}")]
         ])
-        
+
         for admin_id in ADMIN_IDS:
             try:
-                await bot.send_message(
-                    chat_id=admin_id,
-                    text=message,
-                    parse_mode="Markdown",
-                    reply_markup=keyboard
-                )
-                logger.info(f"Уведомление о заказе #{order_id} отправлено админу {admin_id}")
+                await bot.send_message(chat_id=admin_id, text=message, parse_mode="Markdown", reply_markup=keyboard)
+                logger.info(f"✅ Уведомление #{order_id} отправлено админу {admin_id}")
             except Exception as e:
-                logger.error(f"Не удалось отправить уведомление админу {admin_id}: {e}")
-                
+                logger.error(f"Ошибка отправки админу {admin_id}: {e}")
+
     except Exception as e:
-        logger.error(f"Ошибка при отправке уведомления о заказе: {e}")
+        logger.error(f"Ошибка в send_order_notification: {e}")
 
 
 # ==========================================
@@ -166,30 +174,27 @@ async def send_order_notification(order_data: dict):
 async def check_new_orders():
     """Проверяет наличие новых заказов на сайте"""
     global last_order_id, last_check_time
-    
+
     try:
         url = f"{SITE_URL}/{ORDERS_FILE}"
-        
+
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=15) as response:
                 if response.status == 200:
                     orders = await response.json()
-                    
                     if not orders:
                         return
-                    
                     latest_order = orders[0]
-                    
                     if latest_order.get('id') != last_order_id and not latest_order.get('notified', False):
                         await send_order_notification(latest_order)
                         last_order_id = latest_order.get('id')
                         last_check_time = datetime.now()
-                        logger.info(f"✅ Новый заказ #{last_order_id} обнаружен и уведомление отправлено")
+                        logger.info(f"✅ Новый заказ #{last_order_id} обнаружен!")
                     else:
-                        logger.debug(f"Новых заказов нет. Последний ID: {last_order_id}")
+                        logger.debug("Новых заказов нет")
                 else:
                     logger.error(f"Ошибка получения заказов: {response.status}")
-                    
+
     except aiohttp.ClientError as e:
         logger.error(f"Ошибка соединения с сайтом: {e}")
     except json.JSONDecodeError as e:
@@ -197,6 +202,10 @@ async def check_new_orders():
     except Exception as e:
         logger.error(f"Неизвестная ошибка при проверке заказов: {e}")
 
+
+# ==========================================
+# ФОНОВАЯ ПРОВЕРКА
+# ==========================================
 
 async def periodic_check():
     """Запускает проверку заказов каждые 15 секунд"""
@@ -218,7 +227,7 @@ async def cmd_start(message: types.Message):
     user_id = message.from_user.id
     user_name = message.from_user.full_name
     is_admin = user_id in ADMIN_IDS
-    
+
     welcome_text = f"""
 👋 *Здравствуйте, {user_name}!*
 
@@ -235,7 +244,7 @@ async def cmd_start(message: types.Message):
 
 💡 Статус: {'✅ Вы администратор' if is_admin else '❌ Вы не администратор'}
     """
-    
+
     await message.answer(welcome_text, parse_mode="Markdown")
 
 
@@ -281,7 +290,7 @@ async def cmd_check(message: types.Message):
     if user_id not in ADMIN_IDS:
         await message.answer("❌ Только для админов.")
         return
-    
+
     await message.answer("🔍 Проверяю заказы...")
     await check_new_orders()
     await message.answer("✅ Проверка завершена!")
@@ -291,9 +300,9 @@ async def cmd_check(message: types.Message):
 async def cmd_admin(message: types.Message):
     user_id = message.from_user.id
     is_admin = user_id in ADMIN_IDS
-    
+
     admin_list = "\n".join([f"• `{aid}`" for aid in ADMIN_IDS]) if ADMIN_IDS else "• (пусто)"
-    
+
     admin_text = f"""
 🔐 *Администраторы*
 
@@ -315,7 +324,7 @@ async def process_view_order(callback_query: types.CallbackQuery):
     order_id = callback_query.data.replace('view_order_', '')
     await callback_query.answer(f"👀 Заказ #{order_id}")
     await callback_query.message.reply(
-        f"🔍 Просмотр: https://mirsharov-pb.ru/?admin=mirsharov2026"
+        f"🔍 Просмотр: {SITE_URL}/?admin=mirsharov2026"
     )
 
 
@@ -335,22 +344,27 @@ async def process_order(callback_query: types.CallbackQuery):
 
 async def main():
     logger.info("🚀 Бот запускается...")
-    
+
     try:
         me = await bot.get_me()
         logger.info(f"✅ Бот @{me.username} запущен")
         logger.info(f"👥 Админы: {ADMIN_IDS}")
-        
+
         await bot.delete_webhook(drop_pending_updates=True)
-        
+
+        # ЗАПУСКАЕМ ВЕБ-СЕРВЕР (для Render)
+        asyncio.create_task(start_web_server())
+        logger.info("🌐 Веб-сервер запущен")
+
         # Запускаем фоновую проверку
         asyncio.create_task(periodic_check())
         logger.info("🔄 Проверка заказов запущена")
-        
-        # Проверяем сразу при старте
+
         await check_new_orders()
-        
+
+        logger.info("📡 Начинаем прослушивание обновлений...")
         await dp.start_polling(bot)
+
     except Exception as e:
         logger.error(f"❌ Ошибка при запуске бота: {e}")
 
