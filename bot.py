@@ -35,23 +35,24 @@ dp = Dispatcher(storage=storage)
 last_order_id = None
 last_check_time = datetime.now() - timedelta(minutes=5)
 
+# ==========================================
+# КОНСТАНТЫ
+# ==========================================
+CHECK_INTERVAL = 300  # 5 минут между проверками (в секундах)
 
 # ==========================================
-# ВЕБ-СЕРВЕР ДЛЯ RENDER (чтобы не убивал процесс)
+# ВЕБ-СЕРВЕР ДЛЯ RENDER
 # ==========================================
 
 async def health_check(request):
-    """Проверка здоровья для Render"""
     return web.Response(text="OK", status=200)
 
 async def start_web_server():
-    """Запускает минимальный веб-сервер"""
     app = web.Application()
     app.router.add_get('/', health_check)
     app.router.add_get('/health', health_check)
     app.router.add_get('/ping', health_check)
     
-    # Порт 10000 для Render
     port = int(os.environ.get('PORT', 10000))
     runner = web.AppRunner(app)
     await runner.setup()
@@ -65,7 +66,6 @@ async def start_web_server():
 # ==========================================
 
 async def send_order_notification(order_data: dict):
-    """Отправляет уведомление о заказе всем администраторам"""
     try:
         order_id = order_data.get('id', 'Неизвестно')
         order_date = order_data.get('date', datetime.now().strftime("%d.%m.%Y %H:%M"))
@@ -204,18 +204,18 @@ async def check_new_orders():
 
 
 # ==========================================
-# ФОНОВАЯ ПРОВЕРКА
+# ФОНОВАЯ ПРОВЕРКА (каждые 5 минут)
 # ==========================================
 
 async def periodic_check():
-    """Запускает проверку заказов каждые 15 секунд"""
-    logger.info("🔄 Запущена фоновая проверка заказов (каждые 15 секунд)")
+    """Запускает проверку заказов каждые 5 минут"""
+    logger.info(f"🔄 Запущена фоновая проверка заказов (каждые {CHECK_INTERVAL // 60} минут)")
     while True:
         try:
             await check_new_orders()
         except Exception as e:
             logger.error(f"Ошибка в periodic_check: {e}")
-        await asyncio.sleep(15)
+        await asyncio.sleep(CHECK_INTERVAL)  # 300 секунд = 5 минут
 
 
 # ==========================================
@@ -242,6 +242,8 @@ async def cmd_start(message: types.Message):
 /check — принудительная проверка заказов
 /admin — информация для администраторов
 
+⏱ Проверка заказов: каждые 5 минут
+
 💡 Статус: {'✅ Вы администратор' if is_admin else '❌ Вы не администратор'}
     """
 
@@ -260,7 +262,7 @@ async def cmd_help(message: types.Message):
 /check — проверить новые заказы
 /admin — информация об админах
 
-📦 Бот автоматически проверяет заказы каждые 15 секунд.
+📦 Бот автоматически проверяет заказы каждые 5 минут.
     """
     await message.answer(help_text, parse_mode="Markdown")
 
@@ -278,7 +280,7 @@ async def cmd_stats(message: types.Message):
 🔄 Статус: ✅ Работает
 📅 Запущен: {datetime.now().strftime("%d.%m.%Y %H:%M")}
 👥 Админов: {len(ADMIN_IDS)}
-📦 Проверка: каждые 15 сек
+📦 Проверка: каждые {CHECK_INTERVAL // 60} минут
 🕐 Последняя: {last_check_time.strftime("%H:%M:%S") if last_check_time else "—"}
     """
     await message.answer(stats_text, parse_mode="Markdown")
@@ -346,24 +348,29 @@ async def main():
     logger.info("🚀 Бот запускается...")
 
     try:
+        # Принудительно удаляем вебхук
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("✅ Вебхук удалён")
+        
+        # Ждём 2 секунды для очистки
+        await asyncio.sleep(2)
+        
         me = await bot.get_me()
         logger.info(f"✅ Бот @{me.username} запущен")
         logger.info(f"👥 Админы: {ADMIN_IDS}")
 
-        await bot.delete_webhook(drop_pending_updates=True)
-
-        # ЗАПУСКАЕМ ВЕБ-СЕРВЕР (для Render)
+        # Запускаем веб-сервер (для Render)
         asyncio.create_task(start_web_server())
         logger.info("🌐 Веб-сервер запущен")
 
-        # Запускаем фоновую проверку
+        # Запускаем фоновую проверку (каждые 5 минут)
         asyncio.create_task(periodic_check())
-        logger.info("🔄 Проверка заказов запущена")
+        logger.info(f"🔄 Проверка заказов запущена (каждые {CHECK_INTERVAL // 60} минут)")
 
         await check_new_orders()
 
         logger.info("📡 Начинаем прослушивание обновлений...")
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, skip_updates=True)
 
     except Exception as e:
         logger.error(f"❌ Ошибка при запуске бота: {e}")
