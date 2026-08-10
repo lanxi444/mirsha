@@ -38,16 +38,18 @@ last_check_time = datetime.now() - timedelta(minutes=5)
 # ==========================================
 # КОНСТАНТЫ
 # ==========================================
-CHECK_INTERVAL = 300  # 5 минут между проверками (в секундах)
+CHECK_INTERVAL = 300  # 5 минут между проверками
 
 # ==========================================
-# ВЕБ-СЕРВЕР ДЛЯ RENDER
+# ВЕБ-СЕРВЕР ДЛЯ RENDER (чтобы не убивал процесс)
 # ==========================================
 
 async def health_check(request):
+    """Проверка здоровья для Render"""
     return web.Response(text="OK", status=200)
 
 async def start_web_server():
+    """Запускает минимальный веб-сервер"""
     app = web.Application()
     app.router.add_get('/', health_check)
     app.router.add_get('/health', health_check)
@@ -172,7 +174,6 @@ async def send_order_notification(order_data: dict):
 # ==========================================
 
 async def check_new_orders():
-    """Проверяет наличие новых заказов на сайте"""
     global last_order_id, last_check_time
 
     try:
@@ -208,14 +209,13 @@ async def check_new_orders():
 # ==========================================
 
 async def periodic_check():
-    """Запускает проверку заказов каждые 5 минут"""
     logger.info(f"🔄 Запущена фоновая проверка заказов (каждые {CHECK_INTERVAL // 60} минут)")
     while True:
         try:
             await check_new_orders()
         except Exception as e:
             logger.error(f"Ошибка в periodic_check: {e}")
-        await asyncio.sleep(CHECK_INTERVAL)  # 300 секунд = 5 минут
+        await asyncio.sleep(CHECK_INTERVAL)
 
 
 # ==========================================
@@ -348,22 +348,21 @@ async def main():
     logger.info("🚀 Бот запускается...")
 
     try:
-        # Принудительно удаляем вебхук
+        # Удаляем вебхук
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("✅ Вебхук удалён")
         
-        # Ждём 2 секунды для очистки
         await asyncio.sleep(2)
         
         me = await bot.get_me()
         logger.info(f"✅ Бот @{me.username} запущен")
         logger.info(f"👥 Админы: {ADMIN_IDS}")
 
-        # Запускаем веб-сервер (для Render)
+        # ========== ВАЖНО: Запускаем веб-сервер ==========
         asyncio.create_task(start_web_server())
         logger.info("🌐 Веб-сервер запущен")
 
-        # Запускаем фоновую проверку (каждые 5 минут)
+        # Запускаем фоновую проверку
         asyncio.create_task(periodic_check())
         logger.info(f"🔄 Проверка заказов запущена (каждые {CHECK_INTERVAL // 60} минут)")
 
