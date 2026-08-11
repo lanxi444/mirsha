@@ -15,7 +15,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # --- КОНФИГУРАЦИЯ ---
-BOT_TOKEN = "8924797159:AAHzZ1G5R6sKXPaHIOMu5xIhZtxq3ik2YFM"
+BOT_TOKEN = ""
 ADMIN_IDS = [1497899700, 1235335612]
 
 SITE_URL = "https://mirsharov-pb.ru"
