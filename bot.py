@@ -14,7 +14,12 @@ from aiohttp import web
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandObject
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    InlineKeyboardMarkup, 
+    InlineKeyboardButton, 
+    BotCommand, 
+    BotCommandScopeDefault
+)
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # ==========================================
@@ -45,6 +50,27 @@ dp = Dispatcher(storage=storage)
 seen_order_ids = set()
 check_lock = asyncio.Lock()
 last_check_time = None
+
+
+# ==========================================
+# РЕГИСТРАЦИЯ КНОПКИ МЕНЮ С КОМАНДАМИ
+# ==========================================
+
+async def setup_bot_commands(bot_instance: Bot):
+    """Устанавливает кнопку «Меню» в поле ввода Telegram"""
+    commands = [
+        BotCommand(command="today", description="📊 Выручка и заказы за сегодня"),
+        BotCommand(command="month", description="📅 Итоги за текущий месяц"),
+        BotCommand(command="recent", description="📋 Последние 5 заказов"),
+        BotCommand(command="find", description="🔍 Поиск заказа (/find 125)"),
+        BotCommand(command="check", description="⚡ Принудительная проверка сайта"),
+        BotCommand(command="stats", description="📈 Состояние и память бота"),
+        BotCommand(command="start", description="👋 Главное меню"),
+        BotCommand(command="help", description="📚 Справочник по командам"),
+        BotCommand(command="ping", description="🏓 Проверка отклика")
+    ]
+    await bot_instance.set_my_commands(commands, scope=BotCommandScopeDefault())
+    logger.info("✅ Кнопка «Меню» со списком команд успешно зарегистрирована в Telegram")
 
 
 # ==========================================
@@ -149,23 +175,21 @@ def get_messenger_button(messenger_val: str, phone: str):
         if clean_phone:
             return InlineKeyboardButton(text="💬 Написать в Viber", url=f"https://viber.click/{clean_phone}")
 
-    # 4. WhatsApp (по умолчанию для WhatsApp или если указан номер)
+    # 4. WhatsApp (по умолчанию)
     if clean_phone:
         return InlineKeyboardButton(text="💬 Написать в WhatsApp", url=f"https://wa.me/{clean_phone}")
 
     return None
 
 def build_order_keyboard(order_data: dict, address: str = "") -> InlineKeyboardMarkup:
-    """Генерация компактной клавиатуры без статусов"""
+    """Генерация клавиатуры карточки заказа"""
     buttons = []
     actions_row = []
 
-    # Кнопка мессенджера
     messenger_btn = get_messenger_button(order_data.get('messenger', ''), order_data.get('phone', ''))
     if messenger_btn:
         actions_row.append(messenger_btn)
 
-    # Кнопка Яндекс.Карт для курьера
     if order_data.get('delivery_type') != 'pickup' and address and address != 'Не указан':
         encoded_address = urllib.parse.quote(address)
         actions_row.append(InlineKeyboardButton(text="🗺 На карте", url=f"https://yandex.ru/maps/?text={encoded_address}"))
@@ -173,7 +197,6 @@ def build_order_keyboard(order_data: dict, address: str = "") -> InlineKeyboardM
     if actions_row:
         buttons.append(actions_row)
 
-    # Ссылка в панель администратора сайта
     buttons.append([
         InlineKeyboardButton(text="⚙️ Открыть в админке", url=f"{SITE_URL}/?admin=mirsharov2026")
     ])
@@ -186,7 +209,7 @@ def build_order_keyboard(order_data: dict, address: str = "") -> InlineKeyboardM
 # ==========================================
 
 def format_order_card(order_data: dict) -> tuple[str, str]:
-    """Формирует HTML-текст карточки заказа с правильной проверкой флагов"""
+    """Формирует HTML-текст карточки заказа"""
     order_id = html.escape(str(order_data.get('id', 'Неизвестно')))
     order_date = html.escape(str(order_data.get('date', datetime.now().strftime("%d.%m.%Y %H:%M"))))
     customer_name = html.escape(str(order_data.get('name', 'Не указано')))
@@ -225,7 +248,6 @@ def format_order_card(order_data: dict) -> tuple[str, str]:
         text += f"🏢 Этаж: {html.escape(str(order_data.get('floor', '-')))} | "
         text += f"📞 Домофон: {html.escape(str(order_data.get('intercom', '-')))}\n"
         
-        # ТОЛЬКО ЕСЛИ ФЛАГ ДЕЙСТВИТЕЛЬНО TRUE
         if is_truthy(order_data.get('leave_at_door')):
             text += "🔑 Оставить у двери: ✅ <b>Да</b>\n"
         if is_truthy(order_data.get('warn_delivery')):
@@ -311,7 +333,6 @@ async def check_new_orders(is_initial_sync: bool = False):
             if not orders:
                 return
 
-            # При первом запуске запоминаем текущие заказы без рассылки
             if is_initial_sync and not seen_order_ids:
                 for o in orders:
                     oid = str(o.get('id', ''))
@@ -590,18 +611,21 @@ async def main():
         me = await bot.get_me()
         logger.info(f"✅ Бот ID: {me.id} успешно авторизован")
 
-        # 1. Запуск внутреннего веб-сервера для пинга
+        # 1. Регистрация всплывающего меню команд
+        await setup_bot_commands(bot)
+
+        # 2. Запуск внутреннего веб-сервера для пинга
         asyncio.create_task(start_web_server())
         logger.info("🌐 Веб-сервер пинга запущен")
 
-        # 2. Первичная синхронизация существующих заказов
+        # 3. Первичная синхронизация существующих заказов
         await check_new_orders(is_initial_sync=True)
 
-        # 3. Запуск фонового планировщика заказов
+        # 4. Запуск фонового планировщика заказов
         asyncio.create_task(periodic_check())
         logger.info(f"🔄 Фоновый опрос сайта запущен (каждые {CHECK_INTERVAL // 60} мин)")
 
-        # 4. Запуск прослушивания Telegram
+        # 5. Запуск прослушивания Telegram
         logger.info("📡 Бот готов к приёму команд...")
         await dp.start_polling(bot, skip_updates=True)
 
