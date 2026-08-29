@@ -25,6 +25,7 @@ ADMIN_IDS = [1497899700, 1235335612]
 
 SITE_URL = "https://mirsharov-pb.ru"
 ORDERS_FILE = "orders.json"
+SEEN_ORDERS_FILE = "seen_orders.json"
 CHECK_INTERVAL = 300  # 5 минут между фоновыми проверками
 
 if not BOT_TOKEN:
@@ -41,8 +42,9 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-last_order_id = None
-last_check_time = datetime.now() - timedelta(minutes=5)
+seen_order_ids = set()
+check_lock = asyncio.Lock()
+last_check_time = None
 
 # Словари статусов
 STATUS_NAMES = {
@@ -52,6 +54,33 @@ STATUS_NAMES = {
     "done": "✅ Выполнен",
     "cancel": "❌ Отменён"
 }
+
+
+# ==========================================
+# РАБОТА С ПАМЯТЬЮ ЗАКАЗОВ
+# ==========================================
+
+def load_seen_orders():
+    """Загрузка списка уже обработанных ID заказов"""
+    global seen_order_ids
+    if os.path.exists(SEEN_ORDERS_FILE):
+        try:
+            with open(SEEN_ORDERS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                seen_order_ids = set(str(x) for x in data)
+                logger.info(f"📂 Загружено {len(seen_order_ids)} ранее сохранённых ID заказов.")
+        except Exception as e:
+            logger.error(f"Ошибка загрузки seen_orders: {e}")
+            seen_order_ids = set()
+
+def save_seen_orders():
+    """Сохранение последних 300 ID заказов в файл"""
+    try:
+        with open(SEEN_ORDERS_FILE, "w", encoding="utf-8") as f:
+            # Храним последние 300 заказов, чтобы файл не разрастался
+            json.dump(list(seen_order_ids)[-300:], f, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения seen_orders: {e}")
 
 
 # ==========================================
@@ -86,7 +115,7 @@ async def fetch_all_orders() -> list:
             async with session.get(url, timeout=15) as response:
                 if response.status == 200:
                     return await response.json()
-                logger.error(f"Ошибка получения заказов: {response.status}")
+                logger.error(f"Ошибка получения заказов: HTTP {response.status}")
     except Exception as e:
         logger.error(f"Ошибка соединения с сайтом при загрузке заказов: {e}")
     return []
@@ -244,35 +273,55 @@ async def send_order_notification(order_data: dict):
         logger.error(f"Ошибка в send_order_notification: {e}")
 
 
-async def check_new_orders():
-    global last_order_id, last_check_time
+async def check_new_orders(is_initial_sync: bool = False):
+    """Проверка новых заказов с защитой от дублей"""
+    global last_check_time
 
-    try:
-        orders = await fetch_all_orders()
-        if not orders:
-            return
-        
-        latest_order = orders[0]
-        if latest_order.get('id') != last_order_id and not latest_order.get('notified', False):
-            await send_order_notification(latest_order)
-            last_order_id = latest_order.get('id')
+    async with check_lock:
+        try:
+            orders = await fetch_all_orders()
             last_check_time = datetime.now()
-            logger.info(f"✅ Новый заказ #{last_order_id} обнаружен!")
-        else:
-            logger.debug("Новых заказов нет")
 
-    except Exception as e:
-        logger.error(f"Ошибка при проверке заказов: {e}")
+            if not orders:
+                return
+
+            # Если это первый запуск после деплоя и база пуста — запоминаем все текущие заказы без спама
+            if is_initial_sync and not seen_order_ids:
+                for o in orders:
+                    oid = str(o.get('id', ''))
+                    if oid:
+                        seen_order_ids.add(oid)
+                save_seen_orders()
+                logger.info(f"✅ Первичная синхронизация: сохранено {len(seen_order_ids)} существующих заказов (уведомления не отправлялись).")
+                return
+
+            # Ищем новые заказы (идем от старых к новым, чтобы порядок уведомлений был правильным)
+            new_orders = []
+            for o in reversed(orders):
+                oid = str(o.get('id', ''))
+                if oid and oid not in seen_order_ids:
+                    new_orders.append(o)
+
+            # Отправляем уведомления только по реально новым заказам
+            for order in new_orders:
+                oid = str(order.get('id', ''))
+                await send_order_notification(order)
+                seen_order_ids.add(oid)
+                save_seen_orders()
+                logger.info(f"✅ Заказ #{oid} обработан и сохранён в базу.")
+
+        except Exception as e:
+            logger.error(f"Ошибка при проверке заказов: {e}")
 
 
 async def periodic_check():
     logger.info(f"🔄 Запущена фоновая проверка заказов (каждые {CHECK_INTERVAL // 60} минут)")
     while True:
+        await asyncio.sleep(CHECK_INTERVAL)
         try:
             await check_new_orders()
         except Exception as e:
             logger.error(f"Ошибка в periodic_check: {e}")
-        await asyncio.sleep(CHECK_INTERVAL)
 
 
 # ==========================================
@@ -295,10 +344,8 @@ async def process_status_change(callback: types.CallbackQuery):
 
         status_text = f"📌 <b>Статус:</b> {status_title}\n🆔 <b>Изменил:</b> <code>{admin_id}</code> (в {current_time})"
 
-        # Сохраняем исходный текст и обновляем блок статуса
         current_msg = callback.message.text or callback.message.caption or ""
         base_text = current_msg.split("➖➖➖➖➖➖➖➖")[0].strip()
-        
         new_text = f"{html.escape(base_text)}\n\n➖➖➖➖➖➖➖➖\n{status_text}"
 
         await callback.message.edit_text(
@@ -448,6 +495,7 @@ async def cmd_recent(message: types.Message):
 
     for o in recent_5:
         oid = html.escape(str(o.get('id', '—')))
+        name = html.escape(str(o.get('name', 'Клиент')))
         phone = html.escape(str(o.get('phone', '—')))
         total = o.get('total', 0)
         dtype = "📍 Самовывоз" if o.get('delivery_type') == 'pickup' else "🚚 Доставка"
@@ -477,10 +525,11 @@ async def cmd_find(message: types.Message, command: CommandObject):
     matched = []
     for o in orders:
         oid = str(o.get('id', '')).lower()
+        name = str(o.get('name', '')).lower()
         phone = str(o.get('phone', '')).lower()
         track = str(o.get('track_key', '')).lower()
 
-        if query_str in oid or query_str in phone or query_str in track:
+        if query_str in oid or query_str in name or query_str in phone or query_str in track:
             matched.append(o)
 
     if not matched:
@@ -513,6 +562,7 @@ async def cmd_stats(message: types.Message):
 🔄 <b>Статус:</b> ✅ Активен (Render Live)
 📅 <b>Время сервера:</b> {datetime.now().strftime("%d.%m.%Y %H:%M:%S")}
 👥 <b>Количество админов:</b> {len(ADMIN_IDS)}
+📦 <b>Заказов в памяти:</b> {len(seen_order_ids)}
 ⏱ <b>Интервал проверки:</b> каждые {CHECK_INTERVAL // 60} мин
 🕐 <b>Последняя проверка:</b> {last_check_time.strftime("%H:%M:%S") if last_check_time else "—"}
     """
@@ -545,6 +595,9 @@ async def main():
     logger.info("🚀 Запуск бота...")
 
     try:
+        # Загружаем уже известные заказы из файла
+        load_seen_orders()
+
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("✅ Вебхук очищен")
         
@@ -557,12 +610,12 @@ async def main():
         asyncio.create_task(start_web_server())
         logger.info("🌐 Веб-сервер пинга запущен")
 
-        # 2. Запуск фонового планировщика заказов
+        # 2. Первичная синхронизация (запоминаем существующие заказы без отправки уведомлений)
+        await check_new_orders(is_initial_sync=True)
+
+        # 3. Запуск фонового планировщика заказов
         asyncio.create_task(periodic_check())
         logger.info(f"🔄 Фоновый опрос сайта запущен (каждые {CHECK_INTERVAL // 60} мин)")
-
-        # 3. Первичная проверка при старте
-        await check_new_orders()
 
         # 4. Запуск прослушивания Telegram
         logger.info("📡 Бот готов к приёму команд...")
