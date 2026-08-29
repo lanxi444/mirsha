@@ -8,7 +8,7 @@ import os
 import re
 import html
 import urllib.parse
-from datetime import datetime, timedelta
+from datetime import datetime
 import aiohttp
 from aiohttp import web
 
@@ -25,18 +25,14 @@ from aiogram.fsm.storage.memory import MemoryStorage
 # ==========================================
 # КОНФИГУРАЦИЯ
 # ==========================================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8924797159:AAHzZ1G5R6sKXPaHIOMu5xIhZtxq3ik2YFM").strip()
 ADMIN_IDS = [1497899700, 1235335612]
 
 SITE_URL = "https://mirsharov-pb.ru"
-ORDERS_FILE = "orders.json"
+API_URL = f"{SITE_URL}/api.php?action=get_orders"
 SEEN_ORDERS_FILE = "seen_orders.json"
-CHECK_INTERVAL = 300  # 5 минут между фоновыми проверками
+CHECK_INTERVAL = 30  # Проверка новых заказов каждые 30 секунд
 
-if not BOT_TOKEN:
-    raise ValueError("Переменная окружения BOT_TOKEN не найдена или пуста! Укажите её в панели Render (Environment).")
-
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -53,45 +49,44 @@ last_check_time = None
 
 
 # ==========================================
-# РЕГИСТРАЦИЯ КНОПКИ МЕНЮ С КОМАНДАМИ
+# 1. ВЕБ-СЕРВЕР (МГНОВЕННЫЙ СТАРТ ДЛЯ RENDER)
 # ==========================================
 
-async def setup_bot_commands(bot_instance: Bot):
-    """Устанавливает кнопку «Меню» в поле ввода Telegram"""
-    commands = [
-        BotCommand(command="today", description="📊 Выручка и заказы за сегодня"),
-        BotCommand(command="month", description="📅 Итоги за текущий месяц"),
-        BotCommand(command="recent", description="📋 Последние 5 заказов"),
-        BotCommand(command="find", description="🔍 Поиск заказа (/find 125)"),
-        BotCommand(command="check", description="⚡ Принудительная проверка сайта"),
-        BotCommand(command="stats", description="📈 Состояние и память бота"),
-        BotCommand(command="start", description="👋 Главное меню"),
-        BotCommand(command="help", description="📚 Справочник по командам"),
-        BotCommand(command="ping", description="🏓 Проверка отклика")
-    ]
-    await bot_instance.set_my_commands(commands, scope=BotCommandScopeDefault())
-    logger.info("✅ Кнопка «Меню» со списком команд зарегистрирована в Telegram")
+async def health_check(request):
+    return web.Response(text="OK", status=200)
+
+async def start_web_server():
+    """Запускает веб-сервер в первую очередь, чтобы Render сразу подтвердил порт"""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    app.router.add_get('/ping', health_check)
+    
+    port = int(os.environ.get('PORT', 10000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host='0.0.0.0', port=port)
+    await site.start()
+    logger.info(f"🌐 Сервер пинга успешно открыт на порту {port}")
 
 
 # ==========================================
-# РАБОТА С ПАМЯТЬЮ ЗАКАЗОВ (АНТИ-ДУБЛИ)
+# 2. РАБОТА С ПАМЯТЬЮ ЗАКАЗОВ
 # ==========================================
 
 def load_seen_orders():
-    """Загрузка списка уже обработанных ID заказов"""
     global seen_order_ids
     if os.path.exists(SEEN_ORDERS_FILE):
         try:
             with open(SEEN_ORDERS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 seen_order_ids = set(str(x) for x in data)
-                logger.info(f"📂 Загружено {len(seen_order_ids)} сохранённых ID заказов.")
+                logger.info(f"📂 Загружено {len(seen_order_ids)} сохранённых заказов.")
         except Exception as e:
             logger.error(f"Ошибка загрузки seen_orders: {e}")
             seen_order_ids = set()
 
 def save_seen_orders():
-    """Сохранение последних 300 ID заказов в файл"""
     try:
         with open(SEEN_ORDERS_FILE, "w", encoding="utf-8") as f:
             json.dump(list(seen_order_ids)[-300:], f, ensure_ascii=False)
@@ -100,11 +95,10 @@ def save_seen_orders():
 
 
 # ==========================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# 3. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ==========================================
 
 def is_truthy(val) -> bool:
-    """Точная проверка флагов из формы (защита от строк 'false', '0', None)"""
     if val is None:
         return False
     if isinstance(val, bool):
@@ -113,14 +107,13 @@ def is_truthy(val) -> bool:
         return val > 0
     if isinstance(val, str):
         val_clean = val.strip().lower()
-        if val_clean in ("false", "0", "off", "no", "нет", "none", "null", "undefined", ""):
+        if val_clean in ("false", "0", "off", "no", "нет", "none", "null", ""):
             return False
         if val_clean in ("true", "1", "yes", "да", "on"):
             return True
     return False
 
 def clean_phone_number(phone: str) -> str:
-    """Очищает номер телефона до формата 79XXXXXXXXX"""
     if not phone:
         return ""
     digits = re.sub(r'\D', '', str(phone))
@@ -129,7 +122,6 @@ def clean_phone_number(phone: str) -> str:
     return digits
 
 def parse_order_date(date_str: str):
-    """Парсинг даты заказа из различных форматов"""
     if not date_str:
         return None
     for fmt in ("%d.%m.%Y %H:%M", "%d.%m.%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
@@ -140,29 +132,32 @@ def parse_order_date(date_str: str):
     return None
 
 async def fetch_all_orders() -> list:
-    """Загрузка списка всех заказов с сайта"""
-    url = f"{SITE_URL}/{ORDERS_FILE}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "application/json"
+    }
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=15) as response:
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with session.get(API_URL, ssl=False) as response:
                 if response.status == 200:
-                    return await response.json()
+                    raw_text = await response.text()
+                    data = json.loads(raw_text)
+                    return data if isinstance(data, list) else []
                 logger.error(f"Ошибка получения заказов: HTTP {response.status}")
     except Exception as e:
-        logger.error(f"Ошибка соединения с сайтом: {e}")
+        logger.error(f"Сайт временно недоступен: {e}")
     return []
 
 
 # ==========================================
-# КНОПКИ И МЕССЕНДЖЕРЫ
+# 4. ФОРМИРОВАНИЕ КАРТОЧКИ ЗАКАЗА
 # ==========================================
 
 def get_messenger_button(messenger_val: str, phone: str):
-    """Определяет ссылку на мессенджер в зависимости от выбора клиента"""
     m_clean = str(messenger_val or "").strip().lower()
     clean_phone = clean_phone_number(phone)
 
-    # 1. Telegram
     if any(k in m_clean for k in ("tg", "telegram", "телег")):
         if "@" in messenger_val:
             username = messenger_val.replace("@", "").strip()
@@ -170,25 +165,21 @@ def get_messenger_button(messenger_val: str, phone: str):
         if clean_phone:
             return InlineKeyboardButton(text="💬 Написать в Telegram", url=f"https://t.me/+{clean_phone}")
 
-    # 2. MAX / Макс
     if any(k in m_clean for k in ("max", "макс")):
         if clean_phone:
             return InlineKeyboardButton(text="💬 Написать в MAX", url=f"https://max.ru/{clean_phone}")
         return InlineKeyboardButton(text="💬 Открыть MAX", url="https://max.ru")
 
-    # 3. Viber
     if any(k in m_clean for k in ("viber", "вайбер")):
         if clean_phone:
             return InlineKeyboardButton(text="💬 Написать в Viber", url=f"https://viber.click/{clean_phone}")
 
-    # 4. WhatsApp (по умолчанию)
     if clean_phone:
         return InlineKeyboardButton(text="💬 Написать в WhatsApp", url=f"https://wa.me/{clean_phone}")
 
     return None
 
 def build_order_keyboard(order_data: dict, address: str = "") -> InlineKeyboardMarkup:
-    """Генерация компактной клавиатуры без кнопок смены статуса"""
     buttons = []
     actions_row = []
 
@@ -206,16 +197,9 @@ def build_order_keyboard(order_data: dict, address: str = "") -> InlineKeyboardM
     buttons.append([
         InlineKeyboardButton(text="⚙️ Открыть в админке", url=f"{SITE_URL}/?admin=mirsharov2026")
     ])
-
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-
-# ==========================================
-# ФОРМИРОВАНИЕ ТЕКСТА КАРТОЧКИ ЗАКАЗА
-# ==========================================
-
 def format_order_card(order_data: dict) -> tuple[str, str]:
-    """Формирует HTML-текст карточки заказа со ссылками в названиях товаров"""
     order_id = html.escape(str(order_data.get('id', 'Неизвестно')))
     order_date = html.escape(str(order_data.get('date', datetime.now().strftime("%d.%m.%Y %H:%M"))))
     customer_name = html.escape(str(order_data.get('name', 'Не указано')))
@@ -273,8 +257,6 @@ def format_order_card(order_data: dict) -> tuple[str, str]:
         for idx, item in enumerate(cart, 1):
             item_name = html.escape(str(item.get('name', 'Товар')))
             item_article = html.escape(str(item.get('article', '—')))
-            
-            # Получаем ID товара для создания кликабельной ссылки
             item_product_id = str(item.get('id') or item.get('product_id') or item.get('article') or '').strip()
             item_price = item.get('price', 0)
             item_qty = item.get('quantity', 1)
@@ -294,30 +276,7 @@ def format_order_card(order_data: dict) -> tuple[str, str]:
 
 
 # ==========================================
-# ВЕБ-СЕРВЕР ДЛЯ RENDER (ПИНГ)
-# ==========================================
-
-async def health_check(request):
-    """Проверка здоровья для Render и cron-job.org"""
-    return web.Response(text="OK", status=200)
-
-async def start_web_server():
-    """Запускает веб-сервер для поддержания активности"""
-    app = web.Application()
-    app.router.add_get('/', health_check)
-    app.router.add_get('/health', health_check)
-    app.router.add_get('/ping', health_check)
-    
-    port = int(os.environ.get('PORT', 10000))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, host='0.0.0.0', port=port)
-    await site.start()
-    logger.info(f"🌐 Веб-сервер пинга запущен на порту {port}")
-
-
-# ==========================================
-# ОТПРАВКА И ПРОВЕРКА ЗАКАЗОВ
+# 5. ПРОВЕРКА И ОТПРАВКА ЗАКАЗОВ
 # ==========================================
 
 async def send_order_notification(order_data: dict):
@@ -332,15 +291,11 @@ async def send_order_notification(order_data: dict):
                 logger.info(f"✅ Уведомление #{order_id} отправлено админу ID: {admin_id}")
             except Exception as e:
                 logger.error(f"Ошибка отправки админу ID: {admin_id}: {e}")
-
     except Exception as e:
         logger.error(f"Ошибка в send_order_notification: {e}")
 
-
 async def check_new_orders(is_initial_sync: bool = False):
-    """Проверка заказов с защитой от повторов и дублей"""
     global last_check_time
-
     async with check_lock:
         try:
             orders = await fetch_all_orders()
@@ -370,13 +325,11 @@ async def check_new_orders(is_initial_sync: bool = False):
                 seen_order_ids.add(oid)
                 save_seen_orders()
                 logger.info(f"✅ Заказ #{oid} отправлен в Telegram.")
-
         except Exception as e:
             logger.error(f"Ошибка при проверке заказов: {e}")
 
-
 async def periodic_check():
-    logger.info(f"🔄 Фоновая проверка заказов активна (каждые {CHECK_INTERVAL // 60} минут)")
+    logger.info(f"🔄 Фоновая проверка заказов активна (каждые {CHECK_INTERVAL} сек)")
     while True:
         await asyncio.sleep(CHECK_INTERVAL)
         try:
@@ -386,16 +339,15 @@ async def periodic_check():
 
 
 # ==========================================
-# КОМАНДЫ БОТА
+# 6. КОМАНДЫ БОТА
 # ==========================================
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
     is_admin = user_id in ADMIN_IDS
-
     welcome_text = f"""
-👋 <b>Панель управления заказами</b>
+👋 <b>Панель управления заказами «Мир Шаров»</b>
 🆔 <b>Ваш ID:</b> <code>{user_id}</code>
 
 📦 <b>Команды:</b>
@@ -407,38 +359,27 @@ async def cmd_start(message: types.Message):
 /stats — Состояние бота
 /help — Справка
 
-⏱ Фоновая проверка: <b>каждые 5 минут</b>
 💡 Доступ: <b>{'✅ Администратор' if is_admin else '❌ Ограничен'}</b>
     """
     await message.answer(welcome_text, parse_mode="HTML")
-
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     help_text = """
 📚 <b>Справочник команд:</b>
-
-📊 <b>Аналитика:</b>
-• /today — заказы, выручка и средний чек за сегодня.
+• /today — выручка и заказы за сегодня.
 • /month — итоги за текущий месяц.
-
-🔍 <b>Заказы:</b>
 • /recent — показать 5 последних заказов.
-• /find <code>запрос</code> — поиск (например: <code>/find 105</code> или <code>/find 9999</code>).
+• /find <code>запрос</code> — поиск заказа.
 • /check — проверить сайт прямо сейчас.
-
-⚙️ <b>Системные:</b>
-• /ping — проверка отклика.
-• /stats — статус памяти заказов и последняя проверка.
-• /admin — список ID администраторов.
+• /ping — проверка отклика бота.
+• /stats — статистика памяти.
     """
     await message.answer(help_text, parse_mode="HTML")
 
-
 @dp.message(Command("ping"))
 async def cmd_ping(message: types.Message):
-    await message.answer("🏓 <b>Понг!</b> Бот на Render работает стабильно.", parse_mode="HTML")
-
+    await message.answer("🏓 <b>Понг!</b> Бот на Render работает штатно.", parse_mode="HTML")
 
 @dp.message(Command("today"))
 async def cmd_today(message: types.Message):
@@ -448,12 +389,7 @@ async def cmd_today(message: types.Message):
 
     orders = await fetch_all_orders()
     today_date = datetime.now().date()
-
-    today_orders = []
-    for o in orders:
-        dt = parse_order_date(o.get('date'))
-        if dt and dt.date() == today_date:
-            today_orders.append(o)
+    today_orders = [o for o in orders if parse_order_date(o.get('date')) and parse_order_date(o.get('date')).date() == today_date]
 
     count = len(today_orders)
     total_sum = sum(o.get('total', 0) for o in today_orders)
@@ -473,7 +409,6 @@ async def cmd_today(message: types.Message):
     """
     await message.answer(report, parse_mode="HTML")
 
-
 @dp.message(Command("month"))
 async def cmd_month(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
@@ -482,12 +417,7 @@ async def cmd_month(message: types.Message):
 
     orders = await fetch_all_orders()
     now = datetime.now()
-
-    month_orders = []
-    for o in orders:
-        dt = parse_order_date(o.get('date'))
-        if dt and dt.month == now.month and dt.year == now.year:
-            month_orders.append(o)
+    month_orders = [o for o in orders if parse_order_date(o.get('date')) and parse_order_date(o.get('date')).month == now.month and parse_order_date(o.get('date')).year == now.year]
 
     count = len(month_orders)
     total_sum = sum(o.get('total', 0) for o in month_orders)
@@ -502,7 +432,6 @@ async def cmd_month(message: types.Message):
     """
     await message.answer(report, parse_mode="HTML")
 
-
 @dp.message(Command("recent"))
 async def cmd_recent(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
@@ -516,20 +445,15 @@ async def cmd_recent(message: types.Message):
 
     recent_5 = orders[:5]
     text = "📋 <b>Последние 5 заказов:</b>\n\n"
-
     for o in recent_5:
         oid = html.escape(str(o.get('id', '—')))
         phone = html.escape(str(o.get('phone', '—')))
         total = o.get('total', 0)
         dtype = "📍 Самовывоз" if o.get('delivery_type') == 'pickup' else "🚚 Доставка"
         odate = html.escape(str(o.get('date', '—')))
-
-        text += f"🔹 <b>Заказ #{oid}</b> ({odate})\n"
-        text += f"📞 Телефон: <code>{phone}</code>\n"
-        text += f"💵 {total} ₽ | {dtype}\n\n"
+        text += f"🔹 <b>Заказ #{oid}</b> ({odate})\n📞 Телефон: <code>{phone}</code>\n💵 {total} ₽ | {dtype}\n\n"
 
     await message.answer(text, parse_mode="HTML")
-
 
 @dp.message(Command("find"))
 async def cmd_find(message: types.Message, command: CommandObject):
@@ -539,31 +463,22 @@ async def cmd_find(message: types.Message, command: CommandObject):
 
     query = command.args
     if not query:
-        await message.answer("ℹ️ Укажите номер заказа или телефон.\nПример: <code>/find 125</code> или <code>/find 9999</code>", parse_mode="HTML")
+        await message.answer("ℹ️ Укажите номер заказа или телефон. Пример: <code>/find 125</code>", parse_mode="HTML")
         return
 
     query_str = query.strip().lower()
     orders = await fetch_all_orders()
-
-    matched = []
-    for o in orders:
-        oid = str(o.get('id', '')).lower()
-        phone = str(o.get('phone', '')).lower()
-        track = str(o.get('track_key', '')).lower()
-
-        if query_str in oid or query_str in phone or query_str in track:
-            matched.append(o)
+    matched = [o for o in orders if query_str in str(o.get('id', '')).lower() or query_str in str(o.get('phone', '')).lower() or query_str in str(o.get('track_key', '')).lower()]
 
     if not matched:
         await message.answer(f"🔍 По запросу <b>«{html.escape(query)}»</b> ничего не найдено.", parse_mode="HTML")
         return
 
-    await message.answer(f"🔎 Найдено заказов: <b>{len(matched)}</b> (показываю первые 3):", parse_mode="HTML")
+    await message.answer(f"🔎 Найдено заказов: <b>{len(matched)}</b> (первые 3):", parse_mode="HTML")
     for o in matched[:3]:
         text, address = format_order_card(o)
         keyboard = build_order_keyboard(o, address)
         await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
-
 
 @dp.message(Command("check"))
 async def cmd_check(message: types.Message):
@@ -575,78 +490,61 @@ async def cmd_check(message: types.Message):
     await check_new_orders()
     await message.answer("✅ Проверка завершена!")
 
-
 @dp.message(Command("stats"))
 async def cmd_stats(message: types.Message):
     stats_text = f"""
 📊 <b>Состояние бота:</b>
-
-🔄 <b>Статус:</b> ✅ Активен (Render Live)
-📅 <b>Время сервера:</b> {datetime.now().strftime("%d.%m.%Y %H:%M:%S")}
-👥 <b>Количество админов:</b> {len(ADMIN_IDS)}
+🔄 <b>Статус:</b> ✅ Активен
 📦 <b>Заказов в памяти:</b> {len(seen_order_ids)}
-⏱ <b>Интервал проверки:</b> каждые {CHECK_INTERVAL // 60} мин
+⏱ <b>Интервал проверки:</b> {CHECK_INTERVAL} сек
 🕐 <b>Последняя проверка:</b> {last_check_time.strftime("%H:%M:%S") if last_check_time else "—"}
     """
     await message.answer(stats_text, parse_mode="HTML")
 
 
-@dp.message(Command("admin"))
-async def cmd_admin(message: types.Message):
-    user_id = message.from_user.id
-    is_admin = user_id in ADMIN_IDS
-    admin_list = "\n".join([f"• <code>{aid}</code>" for aid in ADMIN_IDS])
-
-    admin_text = f"""
-🔐 <b>Панель администратора</b>
-
-Ваш ID: <code>{user_id}</code>
-Статус: {'✅ Администратор' if is_admin else '❌ Доступ ограничен'}
-
-📝 Список авторизованных ID админов:
-{admin_list}
-    """
-    await message.answer(admin_text, parse_mode="HTML")
-
-
 # ==========================================
-# ЗАПУСК ПРИЛОЖЕНИЯ
+# 7. ГЛАВНЫЙ ЦИКЛ ЗАПУСКА С АВТО-ПЕРЕПОДКЛЮЧЕНИЕМ
 # ==========================================
 
 async def main():
-    logger.info("🚀 Запуск бота...")
+    logger.info("🚀 Старт инициализации приложения...")
 
-    try:
-        load_seen_orders()
+    # 1. Запуск веб-сервера сразу (чтобы Render моментально увидел порт)
+    await start_web_server()
 
-        await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("✅ Вебхук очищен")
-        
-        await asyncio.sleep(1)
-        
-        me = await bot.get_me()
-        logger.info(f"✅ Бот ID: {me.id} успешно авторизован")
+    # 2. Загрузка памяти заказов
+    load_seen_orders()
 
-        # 1. Регистрация всплывающего меню команд
-        await setup_bot_commands(bot)
+    # 3. Первичная синхронизация существующих заказов
+    await check_new_orders(is_initial_sync=True)
 
-        # 2. Запуск внутреннего веб-сервера для пинга
-        asyncio.create_task(start_web_server())
-        logger.info("🌐 Веб-сервер пинга запущен")
+    # 4. Запуск фонового опроса сайта
+    asyncio.create_task(periodic_check())
 
-        # 3. Первичная синхронизация существующих заказов
-        await check_new_orders(is_initial_sync=True)
+    # 5. Вечный цикл подключения к Telegram (защита от падений при сбоях сети)
+    while True:
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            me = await bot.get_me()
+            logger.info(f"✅ Бот @{me.username} (ID: {me.id}) успешно подключен к Telegram")
+            
+            commands = [
+                BotCommand(command="today", description="📊 Выручка за сегодня"),
+                BotCommand(command="month", description="📅 Итоги месяца"),
+                BotCommand(command="recent", description="📋 Последние 5 заказов"),
+                BotCommand(command="find", description="🔍 Поиск заказа"),
+                BotCommand(command="check", description="⚡ Проверить сайт"),
+                BotCommand(command="stats", description="📈 Состояние"),
+                BotCommand(command="start", description="👋 Главное меню")
+            ]
+            await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+            
+            logger.info("📡 Приём сообщений запущен...")
+            await dp.start_polling(bot)
 
-        # 4. Запуск фонового планировщика заказов
-        asyncio.create_task(periodic_check())
-        logger.info(f"🔄 Фоновый опрос сайта запущен (каждые {CHECK_INTERVAL // 60} мин)")
-
-        # 5. Запуск прослушивания Telegram
-        logger.info("📡 Бот готов к приёму команд...")
-        await dp.start_polling(bot, skip_updates=True)
-
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка при запуске бота: {e}")
+        except Exception as e:
+            logger.error(f"⚠️ Ошибка соединения с Telegram: {e}. Переподключение через 5 секунд...")
+            await asyncio.sleep(5)
 
 
 if __name__ == "__main__":
