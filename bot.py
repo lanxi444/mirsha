@@ -236,9 +236,9 @@ async def send_order_notification(order_data: dict):
         for admin_id in ADMIN_IDS:
             try:
                 await bot.send_message(chat_id=admin_id, text=text, parse_mode="HTML", reply_markup=keyboard)
-                logger.info(f"✅ Уведомление #{order_id} отправлено админу {admin_id}")
+                logger.info(f"✅ Уведомление #{order_id} отправлено админу ID: {admin_id}")
             except Exception as e:
-                logger.error(f"Ошибка отправки админу {admin_id}: {e}")
+                logger.error(f"Ошибка отправки админу ID: {admin_id}: {e}")
 
     except Exception as e:
         logger.error(f"Ошибка в send_order_notification: {e}")
@@ -290,16 +290,15 @@ async def process_status_change(callback: types.CallbackQuery):
         order_id = parts[1]
         status_key = parts[2]
         status_title = STATUS_NAMES.get(status_key, "Обновлён")
-        admin_name = callback.from_user.full_name
+        admin_id = callback.from_user.id
         current_time = datetime.now().strftime("%H:%M")
 
-        status_text = f"📌 <b>Статус:</b> {status_title}\n👤 <b>Изменил:</b> {html.escape(admin_name)} (в {current_time})"
+        status_text = f"📌 <b>Статус:</b> {status_title}\n🆔 <b>Изменил:</b> <code>{admin_id}</code> (в {current_time})"
 
         # Сохраняем исходный текст и обновляем блок статуса
         current_msg = callback.message.text or callback.message.caption or ""
         base_text = current_msg.split("➖➖➖➖➖➖➖➖")[0].strip()
         
-        # Переводим базовый текст в безопасный HTML вид
         new_text = f"{html.escape(base_text)}\n\n➖➖➖➖➖➖➖➖\n{status_text}"
 
         await callback.message.edit_text(
@@ -307,8 +306,8 @@ async def process_status_change(callback: types.CallbackQuery):
             parse_mode="HTML",
             reply_markup=callback.message.reply_markup
         )
-        await callback.answer(f"Статус заказа #{order_id}: {status_title}")
-        logger.info(f"Админ {admin_name} сменил статус #{order_id} на {status_title}")
+        await callback.answer(f"Статус #{order_id}: {status_title}")
+        logger.info(f"Админ ID: {admin_id} сменил статус #{order_id} на {status_title}")
 
     except Exception as e:
         logger.error(f"Ошибка смены статуса: {e}")
@@ -322,13 +321,11 @@ async def process_status_change(callback: types.CallbackQuery):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
-    user_name = message.from_user.full_name
     is_admin = user_id in ADMIN_IDS
 
     welcome_text = f"""
-👋 <b>Здравствуйте, {html.escape(user_name)}!</b>
-
-🤖 Я бот управления заказами магазина <b>Мир Шаров</b>.
+👋 <b>Панель управления заказами</b>
+🆔 <b>Ваш ID:</b> <code>{user_id}</code>
 
 📦 <b>Доступные команды:</b>
 /today — Сводка продаж и выручки за сегодня
@@ -340,7 +337,7 @@ async def cmd_start(message: types.Message):
 /help — Справка
 
 ⏱ Фоновая проверка сайта: <b>каждые 5 минут</b>
-💡 Статус доступа: <b>{'✅ Администратор' if is_admin else '❌ Доступ ограничен'}</b>
+💡 Доступ: <b>{'✅ Администратор' if is_admin else '❌ Ограничен'}</b>
     """
     await message.answer(welcome_text, parse_mode="HTML")
 
@@ -451,14 +448,13 @@ async def cmd_recent(message: types.Message):
 
     for o in recent_5:
         oid = html.escape(str(o.get('id', '—')))
-        name = html.escape(str(o.get('name', 'Клиент')))
         phone = html.escape(str(o.get('phone', '—')))
         total = o.get('total', 0)
         dtype = "📍 Самовывоз" if o.get('delivery_type') == 'pickup' else "🚚 Доставка"
         odate = html.escape(str(o.get('date', '—')))
 
-        text += f"🔹 <b>#{oid}</b> ({odate})\n"
-        text += f"👤 {name} | 📞 <code>{phone}</code>\n"
+        text += f"🔹 <b>Заказ #{oid}</b> ({odate})\n"
+        text += f"📞 Телефон: <code>{phone}</code>\n"
         text += f"💵 {total} ₽ | {dtype}\n\n"
 
     await message.answer(text, parse_mode="HTML")
@@ -472,7 +468,7 @@ async def cmd_find(message: types.Message, command: CommandObject):
 
     query = command.args
     if not query:
-        await message.answer("ℹ️ Укажите номер заказа, имя или телефон.\nПример: <code>/find 125</code> или <code>/find 9999</code>", parse_mode="HTML")
+        await message.answer("ℹ️ Укажите номер заказа или телефон.\nПример: <code>/find 125</code> или <code>/find 9999</code>", parse_mode="HTML")
         return
 
     query_str = query.strip().lower()
@@ -481,11 +477,10 @@ async def cmd_find(message: types.Message, command: CommandObject):
     matched = []
     for o in orders:
         oid = str(o.get('id', '')).lower()
-        name = str(o.get('name', '')).lower()
         phone = str(o.get('phone', '')).lower()
         track = str(o.get('track_key', '')).lower()
 
-        if query_str in oid or query_str in name or query_str in phone or query_str in track:
+        if query_str in oid or query_str in phone or query_str in track:
             matched.append(o)
 
     if not matched:
@@ -517,7 +512,7 @@ async def cmd_stats(message: types.Message):
 
 🔄 <b>Статус:</b> ✅ Активен (Render Live)
 📅 <b>Время сервера:</b> {datetime.now().strftime("%d.%m.%Y %H:%M:%S")}
-👥 <b>Администраторов:</b> {len(ADMIN_IDS)}
+👥 <b>Количество админов:</b> {len(ADMIN_IDS)}
 ⏱ <b>Интервал проверки:</b> каждые {CHECK_INTERVAL // 60} мин
 🕐 <b>Последняя проверка:</b> {last_check_time.strftime("%H:%M:%S") if last_check_time else "—"}
     """
@@ -536,7 +531,7 @@ async def cmd_admin(message: types.Message):
 Ваш ID: <code>{user_id}</code>
 Статус: {'✅ Администратор' if is_admin else '❌ Доступ ограничен'}
 
-📝 Список авторизованных админов:
+📝 Список авторизованных ID админов:
 {admin_list}
     """
     await message.answer(admin_text, parse_mode="HTML")
@@ -556,7 +551,7 @@ async def main():
         await asyncio.sleep(1)
         
         me = await bot.get_me()
-        logger.info(f"✅ Бот @{me.username} успешно авторизован")
+        logger.info(f"✅ Бот ID: {me.id} успешно авторизован")
 
         # 1. Запуск внутреннего веб-сервера для пинга
         asyncio.create_task(start_web_server())
