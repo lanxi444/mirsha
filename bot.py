@@ -15,11 +15,14 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # --- КОНФИГУРАЦИЯ ---
-BOT_TOKEN = "Переменная окружения BOT_TOKEN не найдена!"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_IDS = [1497899700, 1235335612]
 
 SITE_URL = "https://mirsharov-pb.ru"
 ORDERS_FILE = "orders.json"
+
+if not BOT_TOKEN:
+    raise ValueError("Переменная окружения BOT_TOKEN не найдена или пуста! Укажите её в панели Render (Environment).")
 
 # Настройка логирования
 logging.basicConfig(
