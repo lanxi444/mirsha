@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 import aiohttp
 from aiohttp import web
 
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandObject
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -46,18 +46,9 @@ seen_order_ids = set()
 check_lock = asyncio.Lock()
 last_check_time = None
 
-# Словари статусов
-STATUS_NAMES = {
-    "work": "⏳ В работе",
-    "build": "🎈 Собирается (надув)",
-    "delivery": "🚚 Передан курьеру",
-    "done": "✅ Выполнен",
-    "cancel": "❌ Отменён"
-}
-
 
 # ==========================================
-# РАБОТА С ПАМЯТЬЮ ЗАКАЗОВ
+# РАБОТА С ПАМЯТЬЮ ЗАКАЗОВ (АНТИ-ДУБЛИ)
 # ==========================================
 
 def load_seen_orders():
@@ -68,7 +59,7 @@ def load_seen_orders():
             with open(SEEN_ORDERS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 seen_order_ids = set(str(x) for x in data)
-                logger.info(f"📂 Загружено {len(seen_order_ids)} ранее сохранённых ID заказов.")
+                logger.info(f"📂 Загружено {len(seen_order_ids)} сохранённых ID заказов.")
         except Exception as e:
             logger.error(f"Ошибка загрузки seen_orders: {e}")
             seen_order_ids = set()
@@ -77,7 +68,6 @@ def save_seen_orders():
     """Сохранение последних 300 ID заказов в файл"""
     try:
         with open(SEEN_ORDERS_FILE, "w", encoding="utf-8") as f:
-            # Храним последние 300 заказов, чтобы файл не разрастался
             json.dump(list(seen_order_ids)[-300:], f, ensure_ascii=False)
     except Exception as e:
         logger.error(f"Ошибка сохранения seen_orders: {e}")
@@ -87,8 +77,18 @@ def save_seen_orders():
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ==========================================
 
+def is_truthy(val) -> bool:
+    """Точная проверка флагов из формы (защита от строк 'false', '0', None)"""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return val != 0
+    if isinstance(val, str):
+        return val.strip().lower() in ("1", "true", "yes", "да", "on", "y")
+    return False
+
 def clean_phone_number(phone: str) -> str:
-    """Очищает номер телефона для WhatsApp"""
+    """Очищает номер телефона до формата 79XXXXXXXXX"""
     if not phone:
         return ""
     digits = re.sub(r'\D', '', str(phone))
@@ -117,48 +117,76 @@ async def fetch_all_orders() -> list:
                     return await response.json()
                 logger.error(f"Ошибка получения заказов: HTTP {response.status}")
     except Exception as e:
-        logger.error(f"Ошибка соединения с сайтом при загрузке заказов: {e}")
+        logger.error(f"Ошибка соединения с сайтом: {e}")
     return []
 
 
 # ==========================================
-# КЛАВИАТУРЫ И ФОРМАТИРОВАНИЕ ЗАКАЗА
+# КНОПКИ И МЕССЕНДЖЕРЫ
 # ==========================================
 
-def build_order_keyboard(order_id: str, phone: str = "", address: str = "", delivery_type: str = "delivery") -> InlineKeyboardMarkup:
-    """Генерация интерактивной клавиатуры для заказа"""
-    buttons = []
-    
-    # 1-я строка: Быстрые действия
-    row_actions = []
+def get_messenger_button(messenger_val: str, phone: str):
+    """Определяет ссылку на мессенджер в зависимости от выбора клиента"""
+    m_clean = str(messenger_val or "").strip().lower()
     clean_phone = clean_phone_number(phone)
-    if clean_phone:
-        row_actions.append(InlineKeyboardButton(text="💬 WhatsApp", url=f"https://wa.me/{clean_phone}"))
-    
-    if delivery_type != 'pickup' and address and address != 'Не указан':
-        encoded_address = urllib.parse.quote(address)
-        maps_url = f"https://yandex.ru/maps/?text={encoded_address}"
-        row_actions.append(InlineKeyboardButton(text="🗺 На карте", url=maps_url))
-        
-    row_actions.append(InlineKeyboardButton(text="⚙️ В админку", url=f"{SITE_URL}/?admin=mirsharov2026"))
-    buttons.append(row_actions)
 
-    # 2-я и 3-я строки: Управление статусами
+    # 1. Telegram
+    if any(k in m_clean for k in ("tg", "telegram", "телег")):
+        if "@" in messenger_val:
+            username = messenger_val.replace("@", "").strip()
+            return InlineKeyboardButton(text="💬 Написать в Telegram", url=f"https://t.me/{username}")
+        if clean_phone:
+            return InlineKeyboardButton(text="💬 Написать в Telegram", url=f"https://t.me/+{clean_phone}")
+
+    # 2. MAX / Макс
+    if any(k in m_clean for k in ("max", "макс")):
+        if clean_phone:
+            return InlineKeyboardButton(text="💬 Написать в MAX", url=f"https://max.ru/{clean_phone}")
+        return InlineKeyboardButton(text="💬 Открыть MAX", url="https://max.ru")
+
+    # 3. Viber
+    if any(k in m_clean for k in ("viber", "вайбер")):
+        if clean_phone:
+            return InlineKeyboardButton(text="💬 Написать в Viber", url=f"https://viber.click/{clean_phone}")
+
+    # 4. WhatsApp (по умолчанию для WhatsApp или если указан номер)
+    if clean_phone:
+        return InlineKeyboardButton(text="💬 Написать в WhatsApp", url=f"https://wa.me/{clean_phone}")
+
+    return None
+
+def build_order_keyboard(order_data: dict, address: str = "") -> InlineKeyboardMarkup:
+    """Генерация компактной клавиатуры без статусов"""
+    buttons = []
+    actions_row = []
+
+    # Кнопка мессенджера
+    messenger_btn = get_messenger_button(order_data.get('messenger', ''), order_data.get('phone', ''))
+    if messenger_btn:
+        actions_row.append(messenger_btn)
+
+    # Кнопка Яндекс.Карт для курьера
+    if order_data.get('delivery_type') != 'pickup' and address and address != 'Не указан':
+        encoded_address = urllib.parse.quote(address)
+        actions_row.append(InlineKeyboardButton(text="🗺 На карте", url=f"https://yandex.ru/maps/?text={encoded_address}"))
+
+    if actions_row:
+        buttons.append(actions_row)
+
+    # Ссылка в панель администратора сайта
     buttons.append([
-        InlineKeyboardButton(text="⏳ В работе", callback_data=f"st_{order_id}_work"),
-        InlineKeyboardButton(text="🎈 Собирается", callback_data=f"st_{order_id}_build"),
-        InlineKeyboardButton(text="🚚 У курьера", callback_data=f"st_{order_id}_delivery"),
-    ])
-    buttons.append([
-        InlineKeyboardButton(text="✅ Выполнен", callback_data=f"st_{order_id}_done"),
-        InlineKeyboardButton(text="❌ Отменён", callback_data=f"st_{order_id}_cancel"),
+        InlineKeyboardButton(text="⚙️ Открыть в админке", url=f"{SITE_URL}/?admin=mirsharov2026")
     ])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def format_order_card(order_data: dict, status_info: str = None) -> tuple[str, str, str, str]:
-    """Формирует HTML-текст карточки заказа"""
+# ==========================================
+# ФОРМИРОВАНИЕ ТЕКСТА КАРТОЧКИ ЗАКАЗА
+# ==========================================
+
+def format_order_card(order_data: dict) -> tuple[str, str]:
+    """Формирует HTML-текст карточки заказа с правильной проверкой флагов"""
     order_id = html.escape(str(order_data.get('id', 'Неизвестно')))
     order_date = html.escape(str(order_data.get('date', datetime.now().strftime("%d.%m.%Y %H:%M"))))
     customer_name = html.escape(str(order_data.get('name', 'Не указано')))
@@ -179,14 +207,14 @@ def format_order_card(order_data: dict, status_info: str = None) -> tuple[str, s
     text += f"👤 <b>Клиент:</b>\n"
     text += f"Имя: <b>{customer_name}</b>\n"
     text += f"📞 Телефон: <code>{customer_phone}</code>\n"
-    text += f"💬 Мессенджер: {messenger}\n\n"
+    text += f"💬 Мессенджер: <b>{messenger}</b>\n\n"
 
     text += f"📦 <b>Тип:</b> {'📍 <b>Самовывоз</b>' if delivery_type == 'pickup' else '🚚 <b>Доставка</b>'}\n"
 
     raw_address = ""
     if delivery_type != 'pickup':
         address_parts = []
-        if order_data.get('street'): address_parts.append(order_data['street'])
+        if order_data.get('street'): address_parts.append(str(order_data['street']))
         if order_data.get('house'): address_parts.append(f"д. {order_data['house']}")
         if order_data.get('building'): address_parts.append(f"стр. {order_data['building']}")
         if order_data.get('apartment'): address_parts.append(f"кв. {order_data['apartment']}")
@@ -197,13 +225,14 @@ def format_order_card(order_data: dict, status_info: str = None) -> tuple[str, s
         text += f"🏢 Этаж: {html.escape(str(order_data.get('floor', '-')))} | "
         text += f"📞 Домофон: {html.escape(str(order_data.get('intercom', '-')))}\n"
         
-        if order_data.get('leave_at_door'):
-            text += "🔑 Оставить у двери: ✅ Да\n"
-        if order_data.get('warn_delivery'):
-            text += "📞 Предупредить о доставке: ✅ Да\n"
+        # ТОЛЬКО ЕСЛИ ФЛАГ ДЕЙСТВИТЕЛЬНО TRUE
+        if is_truthy(order_data.get('leave_at_door')):
+            text += "🔑 Оставить у двери: ✅ <b>Да</b>\n"
+        if is_truthy(order_data.get('warn_delivery')):
+            text += "📞 Предупредить о доставке: ✅ <b>Да</b>\n"
 
     if order_data.get('order_date'):
-        text += f"📅 <b>Желаемая дата:</b> {html.escape(str(order_data['order_date']))}\n"
+        text += f"📅 <b>Дата доставки:</b> {html.escape(str(order_data['order_date']))}\n"
         text += f"⏰ <b>Время:</b> {html.escape(str(order_data.get('order_time', 'Не указано')))}\n"
 
     if comment:
@@ -223,18 +252,15 @@ def format_order_card(order_data: dict, status_info: str = None) -> tuple[str, s
     else:
         text += "❌ Состав заказа не указан\n"
 
-    if status_info:
-        text += f"\n➖➖➖➖➖➖➖➖\n{status_info}"
-
-    return text, customer_phone, raw_address, delivery_type
+    return text, raw_address
 
 
 # ==========================================
-# ВЕБ-СЕРВЕР ДЛЯ RENDER
+# ВЕБ-СЕРВЕР ДЛЯ RENDER (ПИНГ)
 # ==========================================
 
 async def health_check(request):
-    """Проверка доступности для Render и cron-job.org"""
+    """Проверка здоровья для Render и cron-job.org"""
     return web.Response(text="OK", status=200)
 
 async def start_web_server():
@@ -249,7 +275,7 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, host='0.0.0.0', port=port)
     await site.start()
-    logger.info(f"🌐 Веб-сервер запущен на порту {port}")
+    logger.info(f"🌐 Веб-сервер пинга запущен на порту {port}")
 
 
 # ==========================================
@@ -259,8 +285,8 @@ async def start_web_server():
 async def send_order_notification(order_data: dict):
     try:
         order_id = str(order_data.get('id', 'Неизвестно'))
-        text, phone, address, delivery_type = format_order_card(order_data)
-        keyboard = build_order_keyboard(order_id, phone, address, delivery_type)
+        text, address = format_order_card(order_data)
+        keyboard = build_order_keyboard(order_data, address)
 
         for admin_id in ADMIN_IDS:
             try:
@@ -274,7 +300,7 @@ async def send_order_notification(order_data: dict):
 
 
 async def check_new_orders(is_initial_sync: bool = False):
-    """Проверка новых заказов с защитой от дублей"""
+    """Проверка заказов с защитой от повторов и дублей"""
     global last_check_time
 
     async with check_lock:
@@ -285,80 +311,41 @@ async def check_new_orders(is_initial_sync: bool = False):
             if not orders:
                 return
 
-            # Если это первый запуск после деплоя и база пуста — запоминаем все текущие заказы без спама
+            # При первом запуске запоминаем текущие заказы без рассылки
             if is_initial_sync and not seen_order_ids:
                 for o in orders:
                     oid = str(o.get('id', ''))
                     if oid:
                         seen_order_ids.add(oid)
                 save_seen_orders()
-                logger.info(f"✅ Первичная синхронизация: сохранено {len(seen_order_ids)} существующих заказов (уведомления не отправлялись).")
+                logger.info(f"✅ Первичная синхронизация: сохранено {len(seen_order_ids)} существующих заказов.")
                 return
 
-            # Ищем новые заказы (идем от старых к новым, чтобы порядок уведомлений был правильным)
             new_orders = []
             for o in reversed(orders):
                 oid = str(o.get('id', ''))
                 if oid and oid not in seen_order_ids:
                     new_orders.append(o)
 
-            # Отправляем уведомления только по реально новым заказам
             for order in new_orders:
                 oid = str(order.get('id', ''))
                 await send_order_notification(order)
                 seen_order_ids.add(oid)
                 save_seen_orders()
-                logger.info(f"✅ Заказ #{oid} обработан и сохранён в базу.")
+                logger.info(f"✅ Заказ #{oid} отправлен в Telegram.")
 
         except Exception as e:
             logger.error(f"Ошибка при проверке заказов: {e}")
 
 
 async def periodic_check():
-    logger.info(f"🔄 Запущена фоновая проверка заказов (каждые {CHECK_INTERVAL // 60} минут)")
+    logger.info(f"🔄 Фоновая проверка заказов активна (каждые {CHECK_INTERVAL // 60} минут)")
     while True:
         await asyncio.sleep(CHECK_INTERVAL)
         try:
             await check_new_orders()
         except Exception as e:
             logger.error(f"Ошибка в periodic_check: {e}")
-
-
-# ==========================================
-# ОБРАБОТКА ИЗМЕНЕНИЯ СТАТУСА
-# ==========================================
-
-@dp.callback_query(F.data.startswith("st_"))
-async def process_status_change(callback: types.CallbackQuery):
-    try:
-        parts = callback.data.split("_")
-        if len(parts) < 3:
-            await callback.answer("Ошибка формата статуса")
-            return
-        
-        order_id = parts[1]
-        status_key = parts[2]
-        status_title = STATUS_NAMES.get(status_key, "Обновлён")
-        admin_id = callback.from_user.id
-        current_time = datetime.now().strftime("%H:%M")
-
-        status_text = f"📌 <b>Статус:</b> {status_title}\n🆔 <b>Изменил:</b> <code>{admin_id}</code> (в {current_time})"
-
-        current_msg = callback.message.text or callback.message.caption or ""
-        base_text = current_msg.split("➖➖➖➖➖➖➖➖")[0].strip()
-        new_text = f"{html.escape(base_text)}\n\n➖➖➖➖➖➖➖➖\n{status_text}"
-
-        await callback.message.edit_text(
-            text=new_text,
-            parse_mode="HTML",
-            reply_markup=callback.message.reply_markup
-        )
-        await callback.answer(f"Статус #{order_id}: {status_title}")
-        logger.info(f"Админ ID: {admin_id} сменил статус #{order_id} на {status_title}")
-
-    except Exception as e:
-        logger.error(f"Ошибка смены статуса: {e}")
-        await callback.answer("Статус обновлён!")
 
 
 # ==========================================
@@ -374,16 +361,16 @@ async def cmd_start(message: types.Message):
 👋 <b>Панель управления заказами</b>
 🆔 <b>Ваш ID:</b> <code>{user_id}</code>
 
-📦 <b>Доступные команды:</b>
-/today — Сводка продаж и выручки за сегодня
-/month — Статистика за текущий месяц
+📦 <b>Команды:</b>
+/today — Сводка за сегодня
+/month — Итоги за текущий месяц
 /recent — Список последних 5 заказов
-/find <code>номер</code> — Поиск заказа по номеру или телефону
-/check — Принудительная проверка новых заказов
-/stats — Техническое состояние бота
+/find <code>номер</code> — Поиск заказа
+/check — Принудительная проверка сайта
+/stats — Состояние бота
 /help — Справка
 
-⏱ Фоновая проверка сайта: <b>каждые 5 минут</b>
+⏱ Фоновая проверка: <b>каждые 5 минут</b>
 💡 Доступ: <b>{'✅ Администратор' if is_admin else '❌ Ограничен'}</b>
     """
     await message.answer(welcome_text, parse_mode="HTML")
@@ -396,7 +383,7 @@ async def cmd_help(message: types.Message):
 
 📊 <b>Аналитика:</b>
 • /today — заказы, выручка и средний чек за сегодня.
-• /month — общие итоги за текущий месяц.
+• /month — итоги за текущий месяц.
 
 🔍 <b>Заказы:</b>
 • /recent — показать 5 последних заказов.
@@ -405,7 +392,7 @@ async def cmd_help(message: types.Message):
 
 ⚙️ <b>Системные:</b>
 • /ping — проверка отклика.
-• /stats — статус подключения и последняя проверка.
+• /stats — статус памяти заказов и последняя проверка.
 • /admin — список ID администраторов.
     """
     await message.answer(help_text, parse_mode="HTML")
@@ -444,7 +431,7 @@ async def cmd_today(message: types.Message):
 💰 <b>Общая выручка:</b> <b>{total_sum:,} ₽</b>
 📈 <b>Средний чек:</b> {avg_check:,} ₽
 
-🚚 Доставка курьером: <b>{deliveries}</b>
+🚚 Доставка: <b>{deliveries}</b>
 📍 Самовывоз: <b>{pickups}</b>
     """
     await message.answer(report, parse_mode="HTML")
@@ -495,7 +482,6 @@ async def cmd_recent(message: types.Message):
 
     for o in recent_5:
         oid = html.escape(str(o.get('id', '—')))
-        name = html.escape(str(o.get('name', 'Клиент')))
         phone = html.escape(str(o.get('phone', '—')))
         total = o.get('total', 0)
         dtype = "📍 Самовывоз" if o.get('delivery_type') == 'pickup' else "🚚 Доставка"
@@ -525,11 +511,10 @@ async def cmd_find(message: types.Message, command: CommandObject):
     matched = []
     for o in orders:
         oid = str(o.get('id', '')).lower()
-        name = str(o.get('name', '')).lower()
         phone = str(o.get('phone', '')).lower()
         track = str(o.get('track_key', '')).lower()
 
-        if query_str in oid or query_str in name or query_str in phone or query_str in track:
+        if query_str in oid or query_str in phone or query_str in track:
             matched.append(o)
 
     if not matched:
@@ -538,8 +523,8 @@ async def cmd_find(message: types.Message, command: CommandObject):
 
     await message.answer(f"🔎 Найдено заказов: <b>{len(matched)}</b> (показываю первые 3):", parse_mode="HTML")
     for o in matched[:3]:
-        text, phone, address, dtype = format_order_card(o)
-        keyboard = build_order_keyboard(str(o.get('id', '')), phone, address, dtype)
+        text, address = format_order_card(o)
+        keyboard = build_order_keyboard(o, address)
         await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
 
@@ -595,7 +580,6 @@ async def main():
     logger.info("🚀 Запуск бота...")
 
     try:
-        # Загружаем уже известные заказы из файла
         load_seen_orders()
 
         await bot.delete_webhook(drop_pending_updates=True)
@@ -610,7 +594,7 @@ async def main():
         asyncio.create_task(start_web_server())
         logger.info("🌐 Веб-сервер пинга запущен")
 
-        # 2. Первичная синхронизация (запоминаем существующие заказы без отправки уведомлений)
+        # 2. Первичная синхронизация существующих заказов
         await check_new_orders(is_initial_sync=True)
 
         # 3. Запуск фонового планировщика заказов
