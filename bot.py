@@ -70,7 +70,7 @@ async def setup_bot_commands(bot_instance: Bot):
         BotCommand(command="ping", description="🏓 Проверка отклика")
     ]
     await bot_instance.set_my_commands(commands, scope=BotCommandScopeDefault())
-    logger.info("✅ Кнопка «Меню» со списком команд успешно зарегистрирована в Telegram")
+    logger.info("✅ Кнопка «Меню» со списком команд зарегистрирована в Telegram")
 
 
 # ==========================================
@@ -105,12 +105,18 @@ def save_seen_orders():
 
 def is_truthy(val) -> bool:
     """Точная проверка флагов из формы (защита от строк 'false', '0', None)"""
+    if val is None:
+        return False
     if isinstance(val, bool):
         return val
     if isinstance(val, (int, float)):
-        return val != 0
+        return val > 0
     if isinstance(val, str):
-        return val.strip().lower() in ("1", "true", "yes", "да", "on", "y")
+        val_clean = val.strip().lower()
+        if val_clean in ("false", "0", "off", "no", "нет", "none", "null", "undefined", ""):
+            return False
+        if val_clean in ("true", "1", "yes", "да", "on"):
+            return True
     return False
 
 def clean_phone_number(phone: str) -> str:
@@ -182,7 +188,7 @@ def get_messenger_button(messenger_val: str, phone: str):
     return None
 
 def build_order_keyboard(order_data: dict, address: str = "") -> InlineKeyboardMarkup:
-    """Генерация клавиатуры карточки заказа"""
+    """Генерация компактной клавиатуры без кнопок смены статуса"""
     buttons = []
     actions_row = []
 
@@ -209,7 +215,7 @@ def build_order_keyboard(order_data: dict, address: str = "") -> InlineKeyboardM
 # ==========================================
 
 def format_order_card(order_data: dict) -> tuple[str, str]:
-    """Формирует HTML-текст карточки заказа"""
+    """Формирует HTML-текст карточки заказа со ссылками в названиях товаров"""
     order_id = html.escape(str(order_data.get('id', 'Неизвестно')))
     order_date = html.escape(str(order_data.get('date', datetime.now().strftime("%d.%m.%Y %H:%M"))))
     customer_name = html.escape(str(order_data.get('name', 'Не указано')))
@@ -267,10 +273,20 @@ def format_order_card(order_data: dict) -> tuple[str, str]:
         for idx, item in enumerate(cart, 1):
             item_name = html.escape(str(item.get('name', 'Товар')))
             item_article = html.escape(str(item.get('article', '—')))
+            
+            # Получаем ID товара для создания кликабельной ссылки
+            item_product_id = str(item.get('id') or item.get('product_id') or item.get('article') or '').strip()
             item_price = item.get('price', 0)
             item_qty = item.get('quantity', 1)
             item_total = item_price * item_qty
-            text += f"{idx}. {item_name} (Арт: <code>{item_article}</code>) — {item_price}₽ × {item_qty} = <b>{item_total}₽</b>\n"
+
+            if item_product_id:
+                product_url = f"{SITE_URL}/?product={urllib.parse.quote(item_product_id)}"
+                name_display = f'<a href="{product_url}"><b>{item_name}</b></a>'
+            else:
+                name_display = f'<b>{item_name}</b>'
+
+            text += f"{idx}. {name_display} (Арт: <code>{item_article}</code>) — {item_price}₽ × {item_qty} = <b>{item_total}₽</b>\n"
     else:
         text += "❌ Состав заказа не указан\n"
 
