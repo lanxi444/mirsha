@@ -5,6 +5,7 @@ import asyncio
 import logging
 import json
 import os
+import random
 import re
 import html
 import urllib.parse
@@ -49,7 +50,32 @@ last_check_time = None
 
 
 # ==========================================
-# 1. ВЕБ-СЕРВЕР (МГНОВЕННЫЙ СТАРТ ДЛЯ RENDER)
+# 1. РЕГИСТРАЦИЯ МЕНЮ КОМАНД
+# ==========================================
+
+async def setup_bot_commands(bot_instance: Bot):
+    """Устанавливает кнопку «Меню» в поле ввода Telegram"""
+    commands = [
+        BotCommand(command="test_order", description="🧪 Тестовый заказ"),
+        BotCommand(command="today", description="📊 Выручка и заказы за сегодня"),
+        BotCommand(command="month", description="📅 Итоги за текущий месяц"),
+        BotCommand(command="recent", description="📋 Последние 5 заказов"),
+        BotCommand(command="find", description="🔍 Поиск заказа (/find 125)"),
+        BotCommand(command="check", description="⚡ Проверка заказов"),
+        BotCommand(command="stats", description="📈 Состояние и память бота"),
+        BotCommand(command="start", description="👋 Главное меню"),
+        BotCommand(command="help", description="📚 Справочник по командам"),
+        BotCommand(command="ping", description="🏓 Проверка отклика")
+    ]
+    try:
+        await bot_instance.set_my_commands(commands, scope=BotCommandScopeDefault())
+        logger.info("✅ Кнопка «Меню» со списком команд зарегистрирована в Telegram")
+    except Exception as e:
+        logger.error(f"Ошибка регистрации команд: {e}")
+
+
+# ==========================================
+# 2. ВЕБ-СЕРВЕР (ДЛЯ CRON-JOB / RENDER ПИНГА)
 # ==========================================
 
 async def health_check(request):
@@ -71,7 +97,7 @@ async def start_web_server():
 
 
 # ==========================================
-# 2. РАБОТА С ПАМЯТЬЮ ЗАКАЗОВ
+# 3. РАБОТА С ПАМЯТЬЮ ЗАКАЗОВ
 # ==========================================
 
 def load_seen_orders():
@@ -95,7 +121,7 @@ def save_seen_orders():
 
 
 # ==========================================
-# 3. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# 4. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ==========================================
 
 def is_truthy(val) -> bool:
@@ -151,7 +177,7 @@ async def fetch_all_orders() -> list:
 
 
 # ==========================================
-# 4. ФОРМИРОВАНИЕ КАРТОЧКИ ЗАКАЗА
+# 5. ФОРМИРОВАНИЕ КАРТОЧКИ ЗАКАЗА И КНОПОК
 # ==========================================
 
 def get_messenger_button(messenger_val: str, phone: str):
@@ -276,7 +302,7 @@ def format_order_card(order_data: dict) -> tuple[str, str]:
 
 
 # ==========================================
-# 5. ПРОВЕРКА И ОТПРАВКА ЗАКАЗОВ
+# 6. ПРОВЕРКА И ОТПРАВКА ЗАКАЗОВ
 # ==========================================
 
 async def send_order_notification(order_data: dict):
@@ -339,7 +365,7 @@ async def periodic_check():
 
 
 # ==========================================
-# 6. КОМАНДЫ БОТА
+# 7. КОМАНДЫ БОТА
 # ==========================================
 
 @dp.message(Command("start"))
@@ -351,11 +377,12 @@ async def cmd_start(message: types.Message):
 🆔 <b>Ваш ID:</b> <code>{user_id}</code>
 
 📦 <b>Команды:</b>
+/test_order — Сгенерировать тестовый заказ
 /today — Сводка за сегодня
 /month — Итоги за текущий месяц
 /recent — Список последних 5 заказов
 /find <code>номер</code> — Поиск заказа
-/check — Принудительная проверка сайта
+/check — Проверка заказов
 /stats — Состояние бота
 /help — Справка
 
@@ -367,19 +394,87 @@ async def cmd_start(message: types.Message):
 async def cmd_help(message: types.Message):
     help_text = """
 📚 <b>Справочник команд:</b>
+• /test_order (или /test) — генерация реалистичного тестового заказа.
 • /today — выручка и заказы за сегодня.
 • /month — итоги за текущий месяц.
 • /recent — показать 5 последних заказов.
-• /find <code>запрос</code> — поиск заказа.
-• /check — проверить сайт прямо сейчас.
+• /find <code>запрос</code> — поиск заказа по номеру или телефону.
+• /check — проверка заказов прямо сейчас.
 • /ping — проверка отклика бота.
-• /stats — статистика памяти.
+• /stats — статистика памяти и состояния.
+• /admin — список администраторов.
     """
     await message.answer(help_text, parse_mode="HTML")
 
 @dp.message(Command("ping"))
 async def cmd_ping(message: types.Message):
     await message.answer("🏓 <b>Понг!</b> Бот на Render работает штатно.", parse_mode="HTML")
+
+@dp.message(Command("test_order", "test"))
+async def cmd_test_order(message: types.Message):
+    """Генерация и отправка реалистичного тестового заказа"""
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("❌ Доступно только администраторам.")
+        return
+
+    sample_names = ["Алексей Смирнов", "Елена Васильева", "Дмитрий Кузнецов", "Анна Морозова", "Сергей Попов", "Мария Соколова"]
+    sample_messengers = ["Telegram", "WhatsApp", "MAX", "Viber"]
+    sample_streets = ["ул. Самуила Маршака", "ул. Бориса Пастернака", "ул. Корнея Чуковского", "ул. Анны Ахматовой", "ул. Федосьино"]
+    
+    sample_items = [
+        {"id": "latex_confetti_01", "name": "Шар с конфетти золото", "article": "ЛТ-101", "price": 180, "quantity": random.randint(3, 7)},
+        {"id": "foil_figure_bear", "name": "Фигура Мишка с сердечком", "article": "ФГ-045", "price": 950, "quantity": 1},
+        {"id": "big_bubble_feathers", "name": "Баблс с перьями и надписью", "article": "ББ-012", "price": 1600, "quantity": 1},
+        {"id": "foil_digit_silver", "name": "Цифра 5 серебро (102 см)", "article": "ЦФ-005", "price": 850, "quantity": random.randint(1, 2)},
+        {"id": "latex_pastel_pink", "name": "Латекс пастель Розовый", "article": "ЛТ-022", "price": 130, "quantity": random.randint(5, 15)},
+        {"id": "comp_kids_hero", "name": "Сет «Супергерои»", "article": "КС-303", "price": 2400, "quantity": 1}
+    ]
+
+    selected_cart = random.sample(sample_items, k=random.randint(2, 3))
+    total_sum = sum(item["price"] * item["quantity"] for item in selected_cart)
+
+    is_delivery = random.choice([True, True, False])
+    order_time_now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    test_id = f"TEST-{random.randint(1000, 9999)}"
+    test_track = ''.join(random.choices('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', k=8))
+
+    sample_comments = [
+        "Позвоните за 15 минут до приезда, пожалуйста!",
+        "Домофон временно не работает, наберите по номеру.",
+        "Сделайте красивую композицию на день рождения 🎉",
+        "Не звонить в дверь, спит ребёнок!",
+        ""
+    ]
+
+    mock_order = {
+        "id": test_id,
+        "date": order_time_now,
+        "name": random.choice(sample_names),
+        "phone": f"+7 (9{random.randint(10, 99)}) {random.randint(100, 999)}-{random.randint(10, 99)}-{random.randint(10, 99)}",
+        "messenger": random.choice(sample_messengers),
+        "delivery_type": "delivery" if is_delivery else "pickup",
+        "street": random.choice(sample_streets) if is_delivery else "",
+        "house": str(random.randint(1, 35)) if is_delivery else "",
+        "building": str(random.randint(1, 3)) if (is_delivery and random.choice([True, False])) else "",
+        "apartment": str(random.randint(1, 180)) if is_delivery else "",
+        "porch": str(random.randint(1, 6)) if is_delivery else "",
+        "floor": str(random.randint(1, 17)) if is_delivery else "",
+        "intercom": str(random.randint(1, 180)) if is_delivery else "",
+        "leave_at_door": random.choice([True, False]) if is_delivery else False,
+        "warn_delivery": True if is_delivery else False,
+        "order_date": datetime.now().strftime("%d.%m.%Y"),
+        "order_time": random.choice(["10:00 - 12:00", "13:00 - 15:00", "17:00 - 19:00", "20:00 - 21:00"]),
+        "comment": random.choice(sample_comments),
+        "total": total_sum,
+        "track_key": test_track,
+        "cart": selected_cart
+    }
+
+    text, address = format_order_card(mock_order)
+    keyboard = build_order_keyboard(mock_order, address)
+
+    await message.answer("🧪 <b>Сгенерирован тестовый заказ:</b>", parse_mode="HTML")
+    await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
 @dp.message(Command("today"))
 async def cmd_today(message: types.Message):
@@ -501,15 +596,32 @@ async def cmd_stats(message: types.Message):
     """
     await message.answer(stats_text, parse_mode="HTML")
 
+@dp.message(Command("admin"))
+async def cmd_admin(message: types.Message):
+    user_id = message.from_user.id
+    is_admin = user_id in ADMIN_IDS
+    admin_list = "\n".join([f"• <code>{aid}</code>" for aid in ADMIN_IDS])
+
+    admin_text = f"""
+🔐 <b>Панель администратора</b>
+
+Ваш ID: <code>{user_id}</code>
+Статус: {'✅ Администратор' if is_admin else '❌ Доступ ограничен'}
+
+📝 Список авторизованных ID админов:
+{admin_list}
+    """
+    await message.answer(admin_text, parse_mode="HTML")
+
 
 # ==========================================
-# 7. ГЛАВНЫЙ ЦИКЛ ЗАПУСКА С АВТО-ПЕРЕПОДКЛЮЧЕНИЕМ
+# 8. ГЛАВНЫЙ ЦИКЛ ЗАПУСКА
 # ==========================================
 
 async def main():
     logger.info("🚀 Старт инициализации приложения...")
 
-    # 1. Запуск веб-сервера сразу (чтобы Render моментально увидел порт)
+    # 1. Открытие порта для Render
     await start_web_server()
 
     # 2. Загрузка памяти заказов
@@ -518,26 +630,17 @@ async def main():
     # 3. Первичная синхронизация существующих заказов
     await check_new_orders(is_initial_sync=True)
 
-    # 4. Запуск фонового опроса сайта
+    # 4. Фоновый опрос сайта
     asyncio.create_task(periodic_check())
 
-    # 5. Вечный цикл подключения к Telegram (защита от падений при сбоях сети)
+    # 5. Цикл подключения к Telegram с авто-восстановлением
     while True:
         try:
             await bot.delete_webhook(drop_pending_updates=True)
             me = await bot.get_me()
             logger.info(f"✅ Бот @{me.username} (ID: {me.id}) успешно подключен к Telegram")
             
-            commands = [
-                BotCommand(command="today", description="📊 Выручка за сегодня"),
-                BotCommand(command="month", description="📅 Итоги месяца"),
-                BotCommand(command="recent", description="📋 Последние 5 заказов"),
-                BotCommand(command="find", description="🔍 Поиск заказа"),
-                BotCommand(command="check", description="⚡ Проверить сайт"),
-                BotCommand(command="stats", description="📈 Состояние"),
-                BotCommand(command="start", description="👋 Главное меню")
-            ]
-            await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+            await setup_bot_commands(bot)
             
             logger.info("📡 Приём сообщений запущен...")
             await dp.start_polling(bot)
