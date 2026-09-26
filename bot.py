@@ -26,8 +26,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 # ==========================================
 # КОНФИГУРАЦИЯ
 # ==========================================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8924797159:AAHzZ1G5R6sKXPaHIOMu5xIhZtxq3ik2YFM").strip()
-ADMIN_IDS = [1497899700, 1235335612]
+BOT_TOKEN = os.getenv().strip()
+ADMIN_IDS = []
 
 SITE_URL = "https://mirsharov-pb.ru"
 API_URL = f"{SITE_URL}/api.php?action=get_orders"
